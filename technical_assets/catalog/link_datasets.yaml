@@ -170,7 +170,7 @@ widgets:
     query: >
       SELECT SKU_ID, ANY_VALUE(ITEM_SOURCE_NAME) AS item_name,
              SUM(QUANTITY) AS quantity, SUM(TOTAL) AS revenue
-      FROM `erp-set-up.silver.BUSINESS_ANALYTICS`
+      FROM `gen-lang-client-0520145261.silver.BUSINESS_ANALYTICS`
       WHERE STORE_ID = {{entity_id}} AND ORDER_STATE <> 'Cancelled'
         AND ORDER_DATE >= DATE_TRUNC(CURRENT_DATE(), MONTH)
       GROUP BY SKU_ID
@@ -211,7 +211,7 @@ widgets:
     position: 2
     query: >
       SELECT MASTER_STORE_ID, ROUND(SUM(PREDICTED_SALES_QUANTITY), 1) AS forecast_qty
-      FROM `erp-set-up.gold.FORECAST_RESULTS_UPDATE`
+      FROM `gen-lang-client-0520145261.gold.FORECAST_RESULTS_UPDATE`
       WHERE SKU_ID = {{entity_id}} AND IS_LATEST_FORECAST = TRUE AND DAYS_AHEAD BETWEEN 1 AND 3
       GROUP BY MASTER_STORE_ID
       ORDER BY forecast_qty DESC
@@ -223,7 +223,7 @@ widgets:
     position: 3
     query: >
       SELECT SUM(QUANTITY) AS VALUE
-      FROM `erp-set-up.silver.BUSINESS_ANALYTICS`
+      FROM `gen-lang-client-0520145261.silver.BUSINESS_ANALYTICS`
       WHERE SKU_ID = {{entity_id}} AND ORDER_STATE <> 'Cancelled'
         AND ORDER_DATE >= DATE_TRUNC(CURRENT_DATE(), MONTH)
 
@@ -234,7 +234,7 @@ widgets:
     position: 4
     query: >
       SELECT SUM(TOTAL) AS VALUE
-      FROM `erp-set-up.silver.BUSINESS_ANALYTICS`
+      FROM `gen-lang-client-0520145261.silver.BUSINESS_ANALYTICS`
       WHERE SKU_ID = {{entity_id}} AND ORDER_STATE <> 'Cancelled'
 
   # --- CustomerSegment page ---------------------------------------------
