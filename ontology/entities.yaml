@@ -1,0 +1,196 @@
+# Business entity types for the product-master (better-for-you snacks) graph.
+# 20 node types across 5 tiers. Foreign keys are OMITTED from properties —
+# they appear as graph relationships instead (see relationships.yaml).
+#
+# Residency of the data behind each type:
+#   PIM      -> erp-setup.product_master           (extracted, integrations/pim_bq.yaml)
+#   LIVE     -> erp-setup.bronze/silver/gold       (extracted, integrations/live_bq.yaml)
+#   CURATED  -> authored in-graph, no table yet    (like Monginis' Deal)
+#   HYBRID   -> warehouse text + curated status
+
+entities:
+
+  # ---- Tier 1 : Product / PIM spine -------------------------------------
+  - type: Product
+    description: A sellable SKU — the pivot of the graph. Fed by product_master, matched to live data by SKU.
+    properties:
+      - { name: name,                     type: string, required: true }   # DISPLAY_NAME
+      - { name: flavour,                  type: string }
+      - { name: size_gm,                  type: number }
+      - { name: size_label,               type: string }
+      - { name: version,                  type: string }
+      - { name: status,                   type: reference, references: ProductStatus }
+      - { name: veg_nonveg,               type: reference, references: VegNonVeg }
+      - { name: is_active,                type: boolean }
+      - { name: description,              type: string }
+      - { name: images_link,              type: string }
+      - { name: base_price_inr,           type: number }
+      - { name: gst_rate,                 type: number }
+      - { name: mrp_inr,                  type: number }
+      - { name: total_cogs_inr,           type: number }
+      - { name: shelf_life_days,          type: number }
+      - { name: packaging_type,           type: string }
+      - { name: gs1_barcode,              type: string }
+      - { name: org_labelling_compliance, type: string }
+      - { name: serving_size,             type: string }
+
+  - type: Category
+    description: Top of the product taxonomy (Desserts, Health Bars, Snacks, Mithai, Savories, Dessert bites).
+    properties:
+      - { name: name, type: string, required: true }
+
+  - type: ProductLine
+    description: A product type within a category (Cheesecake, Brownie, Tiramisu, ...).
+    properties:
+      - { name: name, type: string, required: true }
+
+  - type: Ingredient
+    description: A raw or processed ingredient used in product recipes.
+    properties:
+      - { name: name,     type: string, required: true }
+      - { name: category, type: string }
+
+  - type: Allergen
+    description: A declared allergen (Nuts, Dairy, Eggs, Polyols).
+    properties:
+      - { name: name, type: string, required: true }
+
+  - type: Nutrient
+    description: A nutrition-panel line item (Calories, Protein, Sugars, Sodium, ...).
+    properties:
+      - { name: name, type: string, required: true }
+
+  # ---- Tier 2 : Commercial ---------------------------------------------
+  - type: Channel
+    description: A go-to-market sales channel (Swiggy, Zomato, Blinkit, Zepto, Instamart, D2C, HoReCa, ...).
+    properties:
+      - { name: name,         type: string, required: true }
+      - { name: channel_type, type: reference, references: ChannelType }
+
+  - type: Competitor
+    description: A competing brand tracked for pricing & positioning (curated).
+    properties:
+      - { name: name,      type: string, required: true }
+      - { name: website,   type: string }
+      - { name: hq_city,   type: string }
+      - { name: tier,      type: string }
+      - { name: category,  type: string }
+      - { name: is_active, type: boolean }
+
+  - type: CompetitorProduct
+    description: A competitor SKU in a specific city, matched to one of our products (curated).
+    properties:
+      - { name: product_name, type: string, required: true }
+      - { name: size,         type: string }
+      - { name: city,         type: string }
+      - { name: search_hint,  type: string }
+      - { name: is_active,    type: boolean }
+
+  # ---- Tier 3 : Operations (live) --------------------------------------
+  - type: Store
+    description: A dark-store / fulfilment partner.
+    properties:
+      - { name: name,                 type: string, required: true }
+      - { name: city,                 type: string }
+      - { name: latitude,             type: number }
+      - { name: longitude,            type: number }
+      - { name: pos_software,         type: string }
+      - { name: type,                 type: string }
+      - { name: location_description, type: string }
+
+  - type: InventoryBatch
+    description: One store's stock of one SKU in one batch on one day — the grain for precise expiry & liquidation.
+    properties:
+      - { name: snapshot_date,      type: string }
+      - { name: batch_row_number,   type: number }
+      - { name: available_quantity, type: number }
+      - { name: expiry_date,        type: string }
+      - { name: batch_hash,         type: string }
+
+  # ---- Tier 4 : Compliance & Innovation (curated / hybrid) -------------
+  - type: Regulation
+    description: An FSSAI (or other) rule. Curated; drives the regulation-impact process.
+    properties:
+      - { name: name,           type: string, required: true }
+      - { name: authority,      type: string }
+      - { name: status,         type: reference, references: RegulationStatus }
+      - { name: effective_date, type: string }
+      - { name: summary,        type: string }
+      - { name: citation,       type: string }
+
+  - type: Certification
+    description: A supplier / product certificate (BRC, FSSAI, Organic, HACCP) with grade & expiry. Curated.
+    properties:
+      - { name: name,        type: string, required: true }
+      - { name: cert_type,   type: reference, references: CertificationType }
+      - { name: grade,       type: string }
+      - { name: issued_date, type: string }
+      - { name: expiry_date, type: string }
+      - { name: status,      type: reference, references: CertificationStatus }
+      - { name: coa_link,    type: string }
+
+  - type: Supplier
+    description: An ingredient supplier (in ERPNext today; extracted later). Curated for now.
+    properties:
+      - { name: name,            type: string, required: true }
+      - { name: tier,            type: reference, references: SupplierTier }
+      - { name: category,        type: string }
+      - { name: region,          type: string }
+      - { name: fssai_certified, type: boolean }
+      - { name: lead_time_days,  type: number }
+      - { name: is_active,       type: boolean }
+
+  - type: Claim
+    description: An on-pack / marketing claim. Text from PRODUCT_HIGHLIGHT; type & status curated (hybrid).
+    properties:
+      - { name: text,               type: string, required: true }
+      - { name: claim_type,         type: reference, references: ClaimType }
+      - { name: status,             type: reference, references: ClaimStatus }
+      - { name: substantiation_ref, type: string }
+
+  - type: Idea
+    description: An NPD idea / brief in the innovation pipeline. Curated.
+    properties:
+      - { name: name,            type: string, required: true }
+      - { name: stage,           type: reference, references: IdeaStage }
+      - { name: hypothesis,      type: string }
+      - { name: target_cogs_inr, type: number }
+      - { name: thesis_fit,      type: string }
+
+  # ---- Tier 5 : Customer -----------------------------------------------
+  - type: Review
+    description: A customer review / star rating (store-level).
+    properties:
+      - { name: text,          type: string }
+      - { name: star_rating,   type: number }
+      - { name: review_date,   type: string }
+      - { name: source,        type: reference, references: ReviewSource }
+      - { name: customer_name, type: string }
+
+  - type: Complaint
+    description: A customer complaint. Carries the item name, so it's product-linkable.
+    properties:
+      - { name: issue_type,            type: reference, references: IssueType }
+      - { name: item_name,             type: string }
+      - { name: customer_comments,     type: string }
+      - { name: source,                type: string }
+      - { name: order_id,              type: string }
+      - { name: complaint_received_at, type: string }
+
+  - type: CustomerSegment
+    description: A marketing audience segment, per channel.
+    properties:
+      - { name: name,      type: string, required: true }
+      - { name: code,      type: string }
+      - { name: channel,   type: string }
+      - { name: is_active, type: boolean }
+
+  - type: Campaign
+    description: An ad / marketing campaign. Id from marketing data; attributes curated (hybrid).
+    properties:
+      - { name: name,       type: string, required: true }
+      - { name: channel,    type: string }
+      - { name: city,       type: string }
+      - { name: start_date, type: string }
+      - { name: end_date,   type: string }
+      - { name: budget_rs,  type: number }

@@ -1,0 +1,151 @@
+version: 1
+
+# Controlled vocabularies referenced by entity/edge `reference` properties.
+
+vocabularies:
+  - id: ProductStatus
+    name: Product Lifecycle Status
+    owner: portfolio_team
+    members:
+      - { id: Live,             label: "Live",              order: 1 }
+      - { id: OccasionallyLive, label: "Occasionally Live", order: 2 }
+      - { id: UnderTrial,       label: "Under Trial",       order: 3 }
+      - { id: UnderDevelopment, label: "Under Development",  order: 4 }
+      - { id: Discontinued,     label: "Discontinued",      order: 5 }
+
+  - id: VegNonVeg
+    name: Veg / Non-Veg
+    owner: portfolio_team
+    members:
+      - { id: Veg,    label: "Veg",     order: 1 }
+      - { id: NonVeg, label: "Non-Veg", order: 2 }
+
+  - id: ChannelType
+    name: Sales Channel Type
+    owner: sales_team
+    members:
+      - { id: Delivery,      label: "Delivery aggregator",  order: 1 }
+      - { id: QCommerce,     label: "Quick commerce",       order: 2 }
+      - { id: D2C,           label: "Direct-to-consumer",   order: 3 }
+      - { id: Retail,        label: "Modern retail",        order: 4 }
+      - { id: HoReCa,        label: "HoReCa",               order: 5 }
+      - { id: Gifting,       label: "Gifting",              order: 6 }
+      - { id: QSR,           label: "QSR",                  order: 7 }
+      - { id: Corporate,     label: "Corporate",            order: 8 }
+      - { id: Vending,       label: "Vending",              order: 9 }
+
+  - id: AllergenType
+    name: Allergen
+    owner: compliance_team
+    members:
+      - { id: Nuts,    label: "Nuts",    order: 1 }
+      - { id: Dairy,   label: "Dairy",   order: 2 }
+      - { id: Eggs,    label: "Eggs",    order: 3 }
+      - { id: Polyols, label: "Polyols", order: 4 }
+
+  - id: ContainsType
+    name: Allergen Containment Type
+    owner: compliance_team
+    members:
+      - { id: contains,     label: "Contains (directly in product)",       order: 1 }
+      - { id: may_contain,  label: "May contain (facility cross-contact)",  order: 2 }
+
+  - id: RegulationStatus
+    name: Regulation Status
+    owner: compliance_team
+    members:
+      - { id: Draft,    label: "Draft",    order: 1 }
+      - { id: Proposed, label: "Proposed", order: 2 }
+      - { id: Active,   label: "Active",   order: 3 }
+      - { id: Enforced, label: "Enforced", order: 4 }
+      - { id: Repealed, label: "Repealed", order: 5 }
+
+  - id: CertificationType
+    name: Certification Type
+    owner: compliance_team
+    members:
+      - { id: BRC,       label: "BRC",        order: 1 }
+      - { id: FSSAI,     label: "FSSAI",      order: 2 }
+      - { id: Organic,   label: "Organic",    order: 3 }
+      - { id: ISO22000,  label: "ISO 22000",  order: 4 }
+      - { id: HACCP,     label: "HACCP",      order: 5 }
+      - { id: FSSC22000, label: "FSSC 22000", order: 6 }
+
+  - id: CertificationStatus
+    name: Certification Status
+    owner: compliance_team
+    members:
+      - { id: Valid,        label: "Valid",         order: 1 }
+      - { id: ExpiringSoon, label: "Expiring soon", order: 2 }
+      - { id: InRenewal,    label: "In renewal",    order: 3 }
+      - { id: Expired,      label: "Expired",       order: 4 }
+
+  - id: ClaimType
+    name: Claim Type
+    owner: marketing_team
+    members:
+      - { id: Nutritional, label: "Nutritional",      order: 1 }
+      - { id: Ingredient,  label: "Ingredient",       order: 2 }
+      - { id: Health,      label: "Health",           order: 3 }
+      - { id: CleanLabel,  label: "Clean label",      order: 4 }
+      - { id: Positioning, label: "Positioning",      order: 5 }
+
+  - id: ClaimStatus
+    name: Claim Substantiation Status
+    owner: compliance_team
+    members:
+      - { id: Substantiated,   label: "Substantiated by current formulation / lab", order: 1 }
+      - { id: Unsubstantiated, label: "No supporting evidence on file",             order: 2 }
+      - { id: AtRisk,          label: "Threatened by pending regulation",           order: 3 }
+      - { id: Invalidated,     label: "Contradicted by regulation / formulation",   order: 4 }
+
+  - id: IdeaStage
+    name: NPD Idea Stage
+    owner: npd_team
+    members:
+      - { id: Capture,     label: "Capture",     order: 1 }
+      - { id: Triage,      label: "Triage",      order: 2 }
+      - { id: Feasibility, label: "Feasibility", order: 3 }
+      - { id: Pipeline,    label: "Pipeline",    order: 4 }
+      - { id: Development, label: "Development",  order: 5 }
+      - { id: Launch,      label: "Launch",      order: 6 }
+      - { id: Rejected,    label: "Rejected",    order: 7 }
+
+  - id: ReviewSource
+    name: Review Source
+    owner: cx_team
+    members:
+      - { id: Zomato,  label: "Zomato",  order: 1 }
+      - { id: Swiggy,  label: "Swiggy",  order: 2 }
+      - { id: Google,  label: "Google",  order: 3 }
+      - { id: Shopify, label: "Shopify", order: 4 }
+
+  - id: IssueType
+    name: Complaint Issue Type
+    owner: cx_team
+    members:
+      - { id: Quality,      label: "Quality",       order: 1 }
+      - { id: MissingItem,  label: "Missing item",  order: 2 }
+      - { id: WrongItem,    label: "Wrong item",    order: 3 }
+      - { id: LateDelivery, label: "Late delivery", order: 4 }
+      - { id: Packaging,    label: "Packaging",     order: 5 }
+      - { id: Taste,        label: "Taste",         order: 6 }
+      - { id: Other,        label: "Other",         order: 7 }
+
+  - id: SupplierTier
+    name: Supplier Classification Tier
+    owner: procurement_team
+    members:
+      - { id: Tier1, label: "Tier 1 — Strategic / Sole Source", order: 1 }
+      - { id: Tier2, label: "Tier 2 — Preferred",               order: 2 }
+      - { id: Tier3, label: "Tier 3 — Spot / Approved",         order: 3 }
+
+  - id: ContractType
+    name: Supplier Contract Cadence
+    owner: procurement_team
+    members:
+      - { id: Annual,    label: "Annual",    order: 1 }
+      - { id: Quarterly, label: "Quarterly", order: 2 }
+      - { id: Seasonal,  label: "Seasonal",  order: 3 }
+      - { id: Weekly,    label: "Weekly",    order: 4 }
+      - { id: Spot,      label: "Spot",      order: 5 }

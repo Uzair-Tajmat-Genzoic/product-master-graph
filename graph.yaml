@@ -1,0 +1,60 @@
+project: product-master-graph
+version: 1
+
+# Materialised graph storage (Postgres + pgvector). Separate from the upstream
+# BigQuery sources declared in integrations/. Set DATABASE_URL in .env.
+storage:
+  backend: postgres
+  connection: ${env.DATABASE_URL}
+
+# Entity + relationship definitions (the ontology).
+ontology:
+  dir: ./ontology
+  files:
+    entities:      entities.yaml
+    relationships: relationships.yaml
+
+# Controlled vocabularies, hierarchies, KPI definitions.
+master_data:
+  dir: ./master_data
+  files:
+    vocabularies: vocabularies.yaml
+    hierarchies:  hierarchies.yaml
+    kpis:         kpis.yaml
+  cache_dir: .contextgraph/refdata_cache
+
+# Business constraints (projected as meta.Constraint nodes; not enforced).
+policies:
+  dir: ./policies
+  files:
+    constraints: constraints.yaml
+
+# Operational workflows (shelf-life liquidation, demand forecast & dispatch).
+processes:
+  dir: ./processes
+
+# Lazy dataset links + widgets for fast-moving data (inventory, reviews,
+# complaints, forecasts, stock). Seeded on apply; data fetched on demand.
+technical_assets:
+  catalog_dir: ./technical_assets/catalog
+
+# Upstream source systems — both on GCP project erp-set-up.
+integrations:
+  dir: ./integrations
+
+# Ontology evolution — each migration applied at most once.
+migrations:
+  dir: ./migrations
+
+# Sentence-embeddings for the `semantic_neighbors` MCP tool. Disabled for the
+# first run so `apply` doesn't need to download the model; enable when ready.
+embeddings:
+  enabled: false
+  provider: sentence_transformers
+  model: sentence-transformers/all-MiniLM-L6-v2
+
+mcp_server:
+  enabled: true
+  host: 127.0.0.1
+  port: 9090
+  auth: none  # dev mode only

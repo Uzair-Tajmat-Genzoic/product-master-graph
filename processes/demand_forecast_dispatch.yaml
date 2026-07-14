@@ -1,0 +1,54 @@
+version: 1
+
+# POC demo (use case 25.0). Formalises the existing forecasting agent with a
+# single HITL approval that triggers order creation in the sales-channel SaaS.
+
+processes:
+  - id: demand_forecast_dispatch
+    name: Demand Forecast & Dispatch
+    description: |
+      Per store x SKU, read the ML forecast and current stock, produce a
+      replenishment / dispatch recommendation, take one HITL approval, then
+      create the order in the channel SaaS via the action connector.
+    domain: SupplyChain
+    owner: demand_planning_team
+
+    applies_to:
+      - entity: Store
+      - entity: Product
+
+    triggers:
+      - { type: schedule, cron: "0 5 * * *" }        # daily 05:00
+      - { type: manual, allowed_roles: [DemandPlanner] }
+
+    inputs:
+      - { name: master_store_id, type: reference, references: Store,   required: true }
+      - { name: sku,             type: reference, references: Product, required: true }
+
+    outputs:
+      - { name: order_quantity, type: number }
+      - { name: order_created,  type: boolean }
+
+    steps:
+      - id: read_forecast
+        name: Read forecast_for and current stocked_at per store x SKU
+        type: agent
+      - id: recommend_qty
+        name: Recommend dispatch / replenishment quantity
+        type: agent
+        after: read_forecast
+      - id: approve
+        name: Demand owner reviews and approves (HITL)
+        type: human
+        after: recommend_qty
+      - id: create_order
+        name: Create order in channel SaaS via action connector
+        type: conditional
+        after: approve
+        condition: "order_quantity > 0"
+
+    related_kpis: [ForecastAccuracy]
+
+    metadata:
+      version: 1
+      effective_from: 2026-07-11

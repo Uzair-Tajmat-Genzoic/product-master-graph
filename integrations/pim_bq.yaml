@@ -1,0 +1,129 @@
+# PIM integration — erp-set-up.ctx_upside_master_data (static product truth).
+# Maps 8 entity types and 8 relationships to BigQuery tables/views.
+# Helper views (V_PRODUCT_ENRICHED, V_PRODUCT_CLAIM, V_NUTRIENT_DIM) must
+# exist first — see sql/views.sql.
+#
+# Run:  contextgraph apply -C ./product-master-graph -s pim_bq
+
+name: pim_bq
+kind: bigquery
+
+connection:
+  project:     ${env.GCP_PROJECT}          # erp-set-up
+  dataset:     ctx_upside_master_data      # the "product_master" dataset never existed under this name — this is it
+  credentials: ${env.GOOGLE_APPLICATION_CREDENTIALS_JSON}
+
+entities:
+  - type: Product
+    table: V_PRODUCT_ENRICHED              # DIM_PRODUCT + PRICING + PACKAGING + NUTRITION (1:1) on SKU
+    id: SKU
+    properties:
+      name:                     DISPLAY_NAME
+      flavour:                  FLAVOUR
+      size_gm:                  SIZE_GM
+      size_label:               SIZE_LABEL
+      version:                  VERSION
+      status:                   STATUS
+      veg_nonveg:               VEG_NONVEG
+      is_active:                IS_ACTIVE
+      description:              DESCRIPTION
+      images_link:              IMAGES_LINK
+      base_price_inr:           BASE_PRICE_INR
+      gst_rate:                 GST_RATE
+      mrp_inr:                  MRP_INR
+      total_cogs_inr:           TOTAL_COGS_INR
+      shelf_life_days:          SHELF_LIFE_DAYS
+      packaging_type:           PACKAGING_TYPE
+      gs1_barcode:              GS1_BARCODE
+      org_labelling_compliance: ORG_LABELLING_COMPLIANCE
+      serving_size:             SERVING_SIZE
+
+  - type: Category
+    table: DIM_CATEGORY
+    id: CATEGORY_ID
+    properties: { name: CATEGORY_NAME }
+
+  - type: ProductLine
+    table: DIM_PRODUCT_LINE
+    id: PRODUCT_LINE_ID
+    properties: { name: PRODUCT_LINE_NAME }
+
+  - type: Ingredient
+    table: DIM_INGREDIENT
+    id: INGREDIENT_ID
+    properties: { name: INGREDIENT_NAME, category: CATEGORY }
+
+  - type: Allergen
+    table: DIM_ALLERGEN
+    id: ALLERGEN_ID
+    properties: { name: ALLERGEN_NAME }
+
+  - type: Nutrient
+    table: V_NUTRIENT_DIM                   # SELECT DISTINCT NUTRIENT_NAME (empty until nutrient OCR runs)
+    id: NUTRIENT_NAME
+    properties: { name: NUTRIENT_NAME }
+
+  - type: Channel
+    table: DIM_CHANNEL
+    id: CHANNEL_ID
+    properties: { name: CHANNEL_NAME, channel_type: CHANNEL_TYPE }
+
+  - type: Claim
+    table: V_PRODUCT_CLAIM                  # PRODUCT_HIGHLIGHT + surrogate CLAIM_ID
+    id: CLAIM_ID
+    properties: { text: HIGHLIGHT_TEXT }
+
+relationships:
+  - type: in_product_line
+    table: DIM_PRODUCT
+    from: { entity: Product,     column: SKU }
+    to:   { entity: ProductLine, column: PRODUCT_LINE_ID }
+
+  - type: in_category
+    table: DIM_PRODUCT
+    from: { entity: Product,  column: SKU }
+    to:   { entity: Category, column: CATEGORY_ID }
+
+  - type: line_in_category
+    table: DIM_PRODUCT_LINE
+    from: { entity: ProductLine, column: PRODUCT_LINE_ID }
+    to:   { entity: Category,    column: CATEGORY_ID }
+
+  - type: contains_ingredient
+    table: MAP_PRODUCT_INGREDIENT
+    from: { entity: Product,    column: SKU }
+    to:   { entity: Ingredient, column: INGREDIENT_ID }
+
+  - type: declares_allergen
+    table: MAP_PRODUCT_ALLERGEN
+    from: { entity: Product,  column: SKU }
+    to:   { entity: Allergen, column: ALLERGEN_ID }
+    edge_properties:
+      contains_type: CONTAINS_TYPE
+
+  - type: declares_nutrient
+    table: PRODUCT_NUTRIENT                 # empty until parse_nutrients.py populates it
+    from: { entity: Product,  column: SKU }
+    to:   { entity: Nutrient, column: NUTRIENT_NAME }
+    edge_properties:
+      value:  VALUE
+      unit:   UNIT
+      dv_pct: DV_PCT
+
+  - type: listed_on
+    table: MAP_PRODUCT_CHANNEL
+    from: { entity: Product, column: SKU }
+    to:   { entity: Channel, column: CHANNEL_ID }
+    edge_properties:
+      applicable:              APPLICABLE
+      channel_base_price_inr:  CHANNEL_BASE_PRICE_INR
+      channel_gst_rate:        CHANNEL_GST_RATE
+      channel_mrp_inr:         CHANNEL_MRP_INR
+      channel_cogs_inr:        CHANNEL_COGS_INR
+      channel_shelf_life_days: CHANNEL_SHELF_LIFE_DAYS
+      primary_sales_owner:     PRIMARY_SALES_OWNER
+
+  - type: claimed_by
+    table: V_PRODUCT_CLAIM
+    from: { entity: Claim,   column: CLAIM_ID }
+    to:   { entity: Product, column: SKU }

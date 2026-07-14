@@ -1,0 +1,57 @@
+# Business constraints, projected as meta.Constraint nodes. Enforcement is
+# metadata-only — rule strings are evaluated by downstream pipelines/agents.
+
+constraints:
+  - name: product_sku_unique
+    description: SKUs must be unique across products.
+    applies_to: Product
+    rule: "UNIQUE(sku)"
+    severity: error
+
+  - name: live_sku_resolves
+    description: |
+      Every live SKU_ID / product_sku (FLAGGED_INVENTORY, STORE_INVENTORY_DAILY,
+      FORECAST_RESULTS_UPDATE) must resolve to a DIM_PRODUCT.SKU. Unmatched live
+      SKUs are sold-but-not-in-PIM or casing/whitespace mismatches.
+    applies_to: Product
+    rule: "documentation_only"
+    severity: warning
+
+  - name: bom_must_close
+    description: Every active product should have at least one ingredient (BOM closure).
+    applies_to: Product
+    rule: "NOT is_active OR EXISTS (SELECT 1 FROM MAP_PRODUCT_INGREDIENT WHERE SKU = ${entity.id})"
+    severity: warning
+
+  - name: no_restricted_ingredient
+    description: An active product must not contain an ingredient restricted by an Enforced regulation.
+    applies_to: Product
+    rule: "NOT EXISTS (contains_ingredient -> Ingredient <- restricts_ingredient WHERE Regulation.status = 'Enforced')"
+    severity: error
+
+  - name: claim_must_substantiate
+    description: A Substantiated claim must have a supporting nutrient value or ingredient link.
+    applies_to: Claim
+    rule: "status != 'Substantiated' OR EXISTS (substantiated_by_nutrient OR claim_depends_on_ingredient)"
+    severity: warning
+
+  - name: certification_validity
+    description: A certificate marked Valid must not be past its expiry date.
+    applies_to: Certification
+    rule: "status != 'Valid' OR expiry_date >= today"
+    severity: error
+
+  - name: nutrition_report_current
+    description: An active product's nutrition lab report should be under a year old.
+    applies_to: Product
+    rule: "documentation_only"
+    severity: info
+
+  - name: cross_store_transfer_viability
+    description: |
+      An inter-store transfer of a short-shelf-life SKU is only viable when the
+      soonest expiry leaves enough sellable life after transit. Below that,
+      accept wastage or mark down locally instead.
+    applies_to: Store
+    rule: "documentation_only"
+    severity: warning

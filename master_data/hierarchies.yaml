@@ -1,0 +1,54 @@
+version: 1
+
+# Rollup hierarchies. Category members mirror DIM_CATEGORY; individual SKUs
+# attach at runtime via the in_product_line / in_category edges (not enumerated).
+
+hierarchies:
+  - id: ProductCategory
+    name: Product Category Hierarchy
+    description: Category -> ProductLine taxonomy. Drives portfolio rollups (compliance, COGS, wastage).
+    owner: portfolio_team
+    levels:
+      - { id: category,     label: Category,     order: 1 }
+      - { id: product_line, label: "Product Line", order: 2 }
+    members:
+      - { id: desserts,      label: "Desserts",      level: category }
+      - { id: health_bars,   label: "Health Bars",   level: category }
+      - { id: snacks,        label: "Snacks",        level: category }
+      - { id: mithai,        label: "Mithai",        level: category }
+      - { id: savories,      label: "Savories",      level: category }
+      - { id: dessert_bites, label: "Dessert Bites", level: category }
+
+  - id: Geo
+    name: Store Geographic Hierarchy
+    description: Region -> City rollup for store, wastage & review KPIs.
+    owner: supply_chain_team
+    levels:
+      - { id: region, label: Region, order: 1 }
+      - { id: city,   label: City,   order: 2 }
+    members:
+      - { id: india,   label: "India",   level: region }
+      - { id: mumbai,  label: "Mumbai",  level: city, parent: india }
+      - { id: pune,    label: "Pune",    level: city, parent: india }
+      - { id: delhi,   label: "Delhi",   level: city, parent: india }
+      - { id: bengaluru, label: "Bengaluru", level: city, parent: india }
+
+  - id: ChannelGroup
+    name: Channel Grouping
+    description: Online vs Offline grouping — reconciles the PIM channel list with live channel strings.
+    owner: sales_team
+    levels:
+      - { id: mode,    label: Mode,    order: 1 }
+      - { id: channel, label: Channel, order: 2 }
+    members:
+      - { id: online,  label: "Online",  level: mode }
+      - { id: offline, label: "Offline", level: mode }
+      - { id: swiggy,    label: "Swiggy",    level: channel, parent: online }
+      - { id: zomato,    label: "Zomato",    level: channel, parent: online }
+      - { id: blinkit,   label: "Blinkit",   level: channel, parent: online }
+      - { id: zepto,     label: "Zepto",     level: channel, parent: online }
+      - { id: instamart, label: "Instamart", level: channel, parent: online }
+      - { id: d2c,       label: "D2C",       level: channel, parent: online }
+      - { id: horeca,    label: "HoReCa",    level: channel, parent: offline }
+      - { id: qsr,       label: "QSR",       level: channel, parent: offline }
+      - { id: gifting,   label: "Gifting",   level: channel, parent: offline }
