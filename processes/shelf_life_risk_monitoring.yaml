@@ -1,0 +1,97 @@
+version: 1
+
+processes:
+  # Flag near-expiry stock across dark stores and email the owner on approval.
+  - id: shelf_life_risk_monitoring
+    name: Shelf-Life Risk Monitoring
+    description: |
+      Monitors inventory age across dark-store locations against each SKU's
+      remaining shelf life and flags SKUs at risk of wastage before the window
+      closes. After the reviewer confirms, the action is to email the
+      supply-chain owner the at-risk report.
+    domain: SupplyChain
+    owner: supply_chain_team
+
+    # Attach to every Store (the filter binding is what lets a manual run find it).
+    applies_to:
+      - entity: Store
+      - entity: Store
+        where:
+          - { field: id, op: ne, value: __none__ }
+
+    # Dummy
+    triggers:
+      - { type: schedule, cron: "*/8 * * * *" }
+      - { type: event, event_type: shelf_life_risk }
+      - { type: manual, allowed_roles: [SupplyPlanner, DemandPlanner] }
+
+    # Everything the orchestrator actually reads at run time.
+    metadata:
+      version: 1
+      effective_from: 2026-07-15
+      priority: 10
+      requires_human_approval: true
+
+      # Gather the data before the reviewer sees anything: pull all stores'
+      # inventory, then reduce it to just the at-risk batches and name the ids.
+      context_package:
+        - key: at_risk_products
+          source: dataset_search
+          required: true
+          query:
+            entity_type: Store
+            dataset: STORE_INVENTORY_DAILY
+            columns: [store_id, product_sku, available_quantity, expiry_date, snapshot_date, batch_row_number]
+            order_by: snapshot_date
+            order_dir: desc
+            limit: 5000
+          post:
+            latest_by: [store_id, product_sku, batch_row_number]
+            latest_on: snapshot_date
+            compute:
+              - { as: days_to_expiry, days_until: expiry_date }
+            where:
+              - { field: days_to_expiry, op: gte, value: 0 }
+              - { field: days_to_expiry, op: lte, value: 3 }
+              - { field: available_quantity, op: gt, value: 0 }
+            sort_by: days_to_expiry
+            resolve:
+              - { field: store_id, type: Store, as: store_name }
+              - { field: product_sku, type: Product, as: product_name }
+        - { key: scheduled_at, source: event, required: false }
+
+      # Tells the recommender the data is pre-filtered — just summarise and approve.
+      policy_rules:
+        - "`at_risk_products` has ALREADY been filtered by the system to the wastage-risk batches: latest snapshot only, days_to_expiry between 0 and 3, and available_quantity > 0. Do NOT re-filter or re-list every row."
+        - "Write a SHORT decision summary in plain business language — how many SKUs are at risk, across how many stores, and call out the most urgent (smallest days_to_expiry) store(s). Example tone: 'Store 100008 has 3 SKUs expiring within 2 days; 6 stores affected in total.' Do not paste the table."
+        - "Recommend APPROVE to email the supply-chain owner the at-risk report so the manual daily monitoring is captured in writing. If `at_risk_products` is empty, recommend no action (nothing is at risk today)."
+
+      # What runs per decision: APPROVE emails the report; REJECT/ESCALATE don't.
+      actions:
+        - name: email_at_risk_report
+          decision: APPROVE
+          connector: email
+          config:
+            type: email
+            to: "uzairtajmat7@gmail.com"
+            subject: "Shelf-life risk — SKUs nearing expiry (all stores)"
+            body: >-
+              The scheduled shelf-life sweep flagged SKUs at risk of wastage
+              within the 3-day window across all dark stores. Inventory data
+              (by store): {{facts.at_risk_products}}. Please action transfers /
+              markdowns before the window closes.
+
+        - name: hold_no_action
+          decision: REJECT
+          connector: notify
+          config:
+            type: notify
+            recipient: supply_chain_team
+            message: "Shelf-life risk sweep reviewed and held — no email sent this run."
+
+        - name: escalate_review
+          decision: ESCALATE
+          connector: simulated
+          config:
+            type: simulated
+            note: "Shelf-life risk sweep escalated for human review."

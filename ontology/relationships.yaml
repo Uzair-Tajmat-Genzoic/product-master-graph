@@ -1,4 +1,4 @@
-# How the 20 entity types relate. 29 relationships. The number in each
+# How the 20 entity types relate. 30 relationships. The number in each
 # comment matches the numbered ontology map in the explainer artifact.
 # integrations/*.yaml maps the extractable ones to BigQuery tables/views;
 # curated edges (no table) are declared here but not extracted (like
@@ -170,6 +170,17 @@ relationships:
       - { name: wastage_flag,                  type: string }
       - { name: low_stock_flag,                type: string }
       - { name: shelf_life_days,               type: number }
+
+  - type: stock_config_for         # 30 (slow config, materialised like transfer_route)
+    description: Per-(SKU, store) low-stock thresholds — the config that defines the low_stock_flag / risk-days logic on stocked_at. Slow-moving reference data from bronze.LOW_STOCK_CONFIG.
+    from: Product
+    to:   Store
+    cardinality: many-to-many
+    edge_properties:
+      - { name: min_days_shelf_life, type: number }
+      - { name: min_count,           type: number }
+      - { name: absolute_risk_count, type: number }
+      - { name: is_active,           type: boolean }
 
   - type: forecast_for             # 21
     description: A product has an ML sales forecast at a store (near-term).

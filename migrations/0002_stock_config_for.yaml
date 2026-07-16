@@ -1,0 +1,12 @@
+# Re-projects the ontology after adding the stock_config_for edge (#30).
+# ingest_ontology is idempotent per-migration; 0001 already ran, so the new
+# edge needs its own migration id to be picked up.
+
+id: 0002_stock_config_for
+description: |
+  Add relationship stock_config_for (Product -> Store, #30): per-(SKU, store)
+  low-stock thresholds from bronze.LOW_STOCK_CONFIG. Slow config, materialised
+  via integrations/live_bq.yaml alongside transfer_route.
+created_at: 2026-07-15
+operations:
+  - kind: ingest_ontology

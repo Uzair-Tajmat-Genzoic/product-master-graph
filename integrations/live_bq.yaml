@@ -64,6 +64,21 @@ relationships:
       distance_km:            DISTANCE_KM
       preferred_for_transfer: PREFERRED_FOR_TRANSFER
 
+  # stock_config_for (ontology edge #30): per-(SKU, store) low-stock thresholds.
+  # Slow-moving config, so materialised here like transfer_route (not a lazy
+  # link). Maps straight to the base table — SKU_ID / STORE_ID are already
+  # STRING, so they join to Product.id (SKU) and Store.id (MASTER_STORE_ID)
+  # with no casting view. CONFIG_ID is 100% NULL upstream, so it's not mapped.
+  - type: stock_config_for
+    table: LOW_STOCK_CONFIG
+    from: { entity: Product, column: SKU_ID }
+    to:   { entity: Store,   column: STORE_ID }
+    edge_properties:
+      min_days_shelf_life: MIN_DAYS_SHELF_LIFE
+      min_count:           MIN_COUNT
+      absolute_risk_count: ABSOLUTE_RISK_COUNT
+      is_active:           IS_ACTIVE
+
   # segment_on_channel (ontology edge #28): each marketing segment runs on one
   # delivery channel. CHANNEL ('SWIGGY'/'ZOMATO') resolved to the Channel node
   # (CH-012/CH-015) by V_SEGMENT_ON_CHANNEL. To-entity Channel is seeded by
