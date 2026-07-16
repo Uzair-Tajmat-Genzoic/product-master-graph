@@ -10,6 +10,29 @@
 
 entities:
 
+  # ---- Tier 0 : Business identity (CURATED, authored in-graph) ----------
+  # Read by the competitive-pricing skill to build the business profile
+  # (brand + category + city). One Company/Brand instance is enough for the
+  # profile to resolve; `brand`, `category` and `city` are the fields it uses.
+  - type: Company
+    description: The operating company that owns the graph. Anchors the competitive-pricing business profile.
+    properties:
+      - { name: name,     type: string, required: true }
+      - { name: brand,    type: string }
+      - { name: category, type: string }
+      - { name: city,     type: string }
+      - { name: country,  type: string }
+      - { name: pincode,  type: string }
+
+  - type: Brand
+    description: A brand the company sells under. Same as Company when the company is single-brand.
+    properties:
+      - { name: name,     type: string, required: true }
+      - { name: category, type: string }
+      - { name: city,     type: string }
+      - { name: country,  type: string }
+      - { name: pincode,  type: string }
+
   # ---- Tier 1 : Product / PIM spine -------------------------------------
   - type: Product
     description: A sellable SKU — the pivot of the graph. Fed by product_master, matched to live data by SKU.
@@ -83,7 +106,6 @@ entities:
       - { name: product_name, type: string, required: true }
       - { name: size,         type: string }
       - { name: city,         type: string }
-      - { name: search_hint,  type: string }
       - { name: is_active,    type: boolean }
 
   # ---- Tier 3 : Operations (live) --------------------------------------

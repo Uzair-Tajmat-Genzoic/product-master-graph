@@ -14,6 +14,30 @@ connection:
   credentials: ${env.GOOGLE_APPLICATION_CREDENTIALS_JSON}
 
 entities:
+  # Business identity — one row in ctx_upside_master_data.COMPANY. Read by the
+  # competitive-pricing skill to build the profile (brand + category + city).
+  # Company and Brand come from the same row (single-brand company).
+  - type: Company
+    table: COMPANY
+    id: COMPANY_ID
+    properties:
+      name:     COMPANY_NAME
+      brand:    BRAND_NAME
+      category: CATEGORY
+      city:     CITY
+      country:  COUNTRY
+      pincode:  PINCODE
+
+  - type: Brand
+    table: COMPANY
+    id: BRAND_NAME
+    properties:
+      name:     BRAND_NAME
+      category: CATEGORY
+      city:     CITY
+      country:  COUNTRY
+      pincode:  PINCODE
+
   - type: Product
     table: V_PRODUCT_ENRICHED              # DIM_PRODUCT + PRICING + PACKAGING + NUTRITION (1:1) on SKU
     id: SKU
@@ -73,6 +97,31 @@ entities:
     id: CLAIM_ID
     properties: { text: HIGHLIGHT_TEXT }
 
+  # Competitive pricing — curated competitor brands + their SKUs (DIM_COMPETITOR,
+  # DIM_COMPETITOR_PRODUCT). Read by the competitive-pricing skill; mirrors the
+  # Monginis graph. CITY on each competitor product must match the scan city.
+  - type: Competitor
+    table: DIM_COMPETITOR
+    id: COMPETITOR_ID
+    properties:
+      name:        COMPETITOR_NAME
+      website:     WEBSITE
+      hq_city:     HQ_CITY
+      country:     COUNTRY
+      category:    CATEGORY
+      tier:        TIER
+      channels:    CHANNELS
+      is_active:   IS_ACTIVE
+
+  - type: CompetitorProduct
+    table: DIM_COMPETITOR_PRODUCT
+    id: COMPETITOR_PRODUCT_ID
+    properties:
+      product_name: PRODUCT_NAME
+      size:         SIZE
+      city:         CITY
+      is_active:    IS_ACTIVE
+
 relationships:
   - type: in_product_line
     table: DIM_PRODUCT
@@ -127,3 +176,18 @@ relationships:
     table: V_PRODUCT_CLAIM
     from: { entity: Claim,   column: CLAIM_ID }
     to:   { entity: Product, column: SKU }
+
+  # CompetitorProduct → our Product (Product id column is SKU here, not PRODUCT_ID).
+  - type: maps_to_product
+    table: MAP_COMPETITOR_PRODUCT_TO_PRODUCT
+    from: { entity: CompetitorProduct, column: COMPETITOR_PRODUCT_ID }
+    to:   { entity: Product,           column: SKU }
+    edge_properties:
+      match_confidence: MATCH_CONFIDENCE
+      note:             NOTE
+
+  # CompetitorProduct → Competitor (edge projected off DIM_COMPETITOR_PRODUCT.COMPETITOR_ID).
+  - type: catalogued_by
+    table: DIM_COMPETITOR_PRODUCT
+    from: { entity: CompetitorProduct, column: COMPETITOR_PRODUCT_ID }
+    to:   { entity: Competitor,        column: COMPETITOR_ID }
