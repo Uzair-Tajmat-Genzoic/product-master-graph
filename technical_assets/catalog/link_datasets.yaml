@@ -84,12 +84,24 @@ datasets:
 
   - entity_type: Product
     name: Forecast
-    description: Latest-run demand forecast (next 1-3 days) per store for this product, from the gold BASE table (no view) — queried via a raw widget query that fully-qualifies gold.FORECAST_RESULTS_UPDATE.
-    source_table: FORECAST_RESULTS_UPDATE
+    description: Latest-run demand forecast (next 1-3 days) per store for this product, from the gold BASE table. source_table is dataset-qualified (gold.) so the dataset-read path (widgets + the demand_forecast_dispatch gather) resolves it in gold, not the connection's default bronze dataset.
+    source_table: gold.FORECAST_RESULTS_UPDATE
     connection: live_bq
     cardinality: "1:m"
     join_keys:
       - { entity_attribute: id, table_column: SKU_ID }
+    columns: [SKU_ID, MASTER_STORE_ID, FORECAST_DATE, PREDICTED_SALES_QUANTITY, DAYS_AHEAD, IS_LATEST_FORECAST]
+
+  # Same gold forecast table, joined by STORE — lets the demand_forecast_dispatch
+  # gather START from the Store node (per-store forecast read), symmetric with inventory.
+  - entity_type: Store
+    name: Forecast by store
+    description: Latest-run demand forecast per SKU for this store, from gold. Store-anchored (join on MASTER_STORE_ID) so a gather can traverse Store -> forecast.
+    source_table: gold.FORECAST_RESULTS_UPDATE
+    connection: live_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: MASTER_STORE_ID }
     columns: [SKU_ID, MASTER_STORE_ID, FORECAST_DATE, PREDICTED_SALES_QUANTITY, DAYS_AHEAD, IS_LATEST_FORECAST]
 
   - entity_type: Product
@@ -206,7 +218,7 @@ widgets:
 
   - entity_type: Product
     type: table
-    dataset: FORECAST_RESULTS_UPDATE
+    dataset: gold.FORECAST_RESULTS_UPDATE
     title: Forecast quantity by store (next 1-3 days)
     position: 2
     query: >

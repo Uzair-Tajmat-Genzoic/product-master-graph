@@ -1,54 +1,181 @@
 version: 1
 
-# POC demo (use case 25.0). Formalises the existing forecasting agent with a
-# single HITL approval that triggers order creation in the sales-channel SaaS.
-
 processes:
+  # Combined demand-forecast-dispatch + liquidation/transfer. Per (store, SKU):
+  # join the next-3-day ML forecast with current sellable stock, then flag
+  #   reorder  = stock will run out (available < forecast)
+  #   liquidate = excess stock that's perishing (available > forecast & near expiry)
+  # One HITL approval dispatches reorders to the sales channel and emails the
+  # liquidation/transfer plan.
   - id: demand_forecast_dispatch
-    name: Demand Forecast & Dispatch
+    name: Demand Forecast, Dispatch & Liquidation
     description: |
-      Per store x SKU, read the ML forecast and current stock, produce a
-      replenishment / dispatch recommendation, take one HITL approval, then
-      create the order in the channel SaaS via the action connector.
+      Joins each dark store's SKU-level demand forecast (next 3 days) with its
+      current on-hand stock, and recommends per (store, SKU) whether to reorder
+      (understock) or liquidate/transfer (perishing overstock). The demand owner
+      approves once; reorders create orders in the sales channel and the
+      liquidation plan is emailed.
     domain: SupplyChain
     owner: demand_planning_team
 
+    # Attach to every Store (the filter binding lets a manual run discover it).
     applies_to:
       - entity: Store
-      - entity: Product
+      - entity: Store
+        where:
+          - { field: id, op: ne, value: __none__ }
 
     triggers:
-      - { type: schedule, cron: "0 5 * * *" }        # daily 05:00
+      - { type: schedule, cron: "0 5 * * *" }          # daily 05:00
+      - { type: event, event_type: demand_forecast }
       - { type: manual, allowed_roles: [DemandPlanner] }
 
-    inputs:
-      - { name: master_store_id, type: reference, references: Store,   required: true }
-      - { name: sku,             type: reference, references: Product, required: true }
-
-    outputs:
-      - { name: order_quantity, type: number }
-      - { name: order_created,  type: boolean }
-
+    # Descriptive stages shown in the "Process stages" panel (modeled in the graph).
+    # DISPLAY ONLY — metadata.steps_display_only tells the executor not to run these
+    # as a step machine, so the metadata-only approve-gate still fires its actions.
     steps:
-      - id: read_forecast
-        name: Read forecast_for and current stocked_at per store x SKU
-        type: agent
-      - id: recommend_qty
-        name: Recommend dispatch / replenishment quantity
-        type: agent
-        after: read_forecast
-      - id: approve
-        name: Demand owner reviews and approves (HITL)
-        type: human
-        after: recommend_qty
-      - id: create_order
-        name: Create order in channel SaaS via action connector
-        type: conditional
-        after: approve
-        condition: "order_quantity > 0"
-
-    related_kpis: [ForecastAccuracy]
+      - { id: collect_forecast,  name: "Collect demand forecast", type: automated, description: "Read the latest ML demand forecast (next 3 days) per store x SKU." }
+      - { id: collect_inventory, name: "Collect current inventory", type: automated, after: collect_forecast, description: "Read each store's current sellable (non-expired) stock per SKU." }
+      - { id: recommend,         name: "Join & recommend", type: automated, after: collect_inventory, description: "Join forecast with inventory; flag reorder (stock below demand) or liquidate (perishing excess)." }
+      - { id: review,            name: "Demand owner review", type: human, after: recommend, description: "Demand owner reviews the plan and approves / rejects / revises (HITL)." }
+      - { id: dispatch,          name: "Dispatch & email plan", type: automated, after: review, description: "On approve: dispatch reorders to the sales channel and email the liquidation plan." }
 
     metadata:
-      version: 1
-      effective_from: 2026-07-11
+      version: 2
+      effective_from: 2026-07-18
+      priority: 10
+      requires_human_approval: true
+      steps_display_only: true      # steps above are descriptive — do NOT run the StepRunner
+
+      context_package:
+        - key: demand_plan
+          required: true
+          # Start from the Store node. For each store: read its next-3-day forecast
+          # AND its current inventory, join on (store, SKU), then walk transfer_route
+          # to find the nearest store, and decide an action.
+          gather:
+            collect:
+              # -- forecast per store, reduced to forecast_3d per (store, SKU)
+              - as: forecast
+                entity: Store                          # START from the Store node ...
+                dataset: gold.FORECAST_RESULTS_UPDATE   # ... follow the Store->forecast link (gold)
+                columns: [SKU_ID, MASTER_STORE_ID, FORECAST_DATE, PREDICTED_SALES_QUANTITY, DAYS_AHEAD, IS_LATEST_FORECAST]
+                limit: 5000
+                reduce:
+                  rename: { SKU_ID: product_sku, MASTER_STORE_ID: store_id }
+                  rollup:
+                    group_by: [store_id, product_sku]
+                    filter_rows:
+                      # "next 3 days" is relative to TODAY (FORECAST_DATE - today), not
+                      # DAYS_AHEAD (which counts from the run date and drifts if stale).
+                      compute:
+                        - { as: _days_out, days_until: FORECAST_DATE }
+                      where:
+                        - { field: IS_LATEST_FORECAST, op: eq, value: true }
+                        - { field: _days_out, op: gte, value: 1 }   # tomorrow ...
+                        - { field: _days_out, op: lte, value: 3 }   # ... through +3
+                    agg:
+                      - { as: forecast_3d, op: sum, col: PREDICTED_SALES_QUANTITY }
+
+              # -- inventory per store: total sellable stock + qty expiring within 3 days
+              - as: inventory
+                entity: Store
+                dataset: STORE_INVENTORY_DAILY
+                columns: [store_id, product_sku, available_quantity, expiry_date, snapshot_date, batch_row_number]
+                order_by: snapshot_date
+                order_dir: desc
+                limit: 2000
+                reduce:
+                  latest_snapshot: { by: [store_id], "on": snapshot_date }
+                  rollup:
+                    group_by: [store_id, product_sku]
+                    filter_rows:
+                      compute:
+                        - { as: _dte, days_until: expiry_date }
+                        # this batch's qty IF it expires within 3 days, else 0 (→ summed into expiring_qty)
+                        - as: _expiring_unit
+                          bucket:
+                            - { when: { field: _dte, op: lte, value: 3 }, value: { col: available_quantity } }
+                            - { else: 0 }
+                      where: [{ field: _dte, op: gte, value: 0 }]   # only non-expired (sellable) stock
+                    agg:
+                      - { as: available_quantity, op: sum, col: available_quantity }
+                      - { as: expiring_qty,       op: sum, col: _expiring_unit }
+                      - { as: soonest_expiry,     op: min, col: expiry_date }
+
+            join:
+              - { left: forecast, right: inventory, "on": [store_id, product_sku], how: outer }
+
+            # nearest transferable store (min distance) via the materialized transfer_route edge
+            links:
+              - from: store_id
+                from_type: Store
+                via: transfer_route
+                direction: out
+                pick: { by: distance_km, order: min }
+                bring: [distance_km]
+                bring_id: nearest_store_id
+
+          post:
+            # outer join / missing edge leave nulls — treat quantities as zero.
+            fillna: { available_quantity: 0, forecast_3d: 0, expiring_qty: 0 }
+            compute:
+              - { as: days_to_expiry, days_until: soonest_expiry }
+              - as: action
+                bucket:
+                  # perishing stock with a nearby store -> propose transfer out
+                  - when:
+                      all:
+                        - { field: expiring_qty, op: gt, value: 0 }
+                        - { field: nearest_store_id, op: ne, value: null }
+                    value: transfer
+                  # perishing stock, no nearby store -> liquidate
+                  - { when: { field: expiring_qty, op: gt, value: 0 }, value: liquidate }
+                  # demand exceeds stock on hand -> replenish (from factory)
+                  - { when: { field: available_quantity, op: lt, ref: forecast_3d }, value: supply_factory }
+                  - { else: hold }
+            where:
+              - { field: action, op: ne, value: hold }
+            sort_by: days_to_expiry
+            resolve:
+              - { field: store_id, type: Store, as: store_name }
+              - { field: product_sku, type: Product, as: product_name }
+              - { field: nearest_store_id, type: Store, as: nearest_store_name }
+        - { key: scheduled_at, source: event, required: false }
+
+      policy_rules:
+        - "`demand_plan` is ALREADY assembled: each row is one (store, SKU) with `available_quantity` (current sellable stock), `expiring_qty` (units expiring within 3 days), `soonest_expiry`, `days_to_expiry`, `forecast_3d` (predicted demand next 3 days), `nearest_store_name` (+ `distance_km`), and an `action` of `transfer` (perishing excess, a nearby store exists), `liquidate` (perishing, no nearby store), or `supply_factory` (stock below forecast). Do NOT re-compute or re-list every row."
+        - "Write a SHORT decision summary: how many SKUs to transfer vs liquidate (perishing) vs supply-from-factory (understock), across how many stores, calling out the most urgent (smallest days_to_expiry). Do not paste the table."
+        - "Recommend APPROVE to action the plan (dispatch replenishments, initiate transfers, email the liquidation list to the demand owner). If `demand_plan` is empty, recommend no action."
+
+      actions:
+        # ponytail: sales-channel SaaS order creation is emailed for now — swap this
+        # for a {type: connector_tool, connector_key: <sales-channel>, intent: ...}
+        # action once that connector is registered.
+        - name: dispatch_and_plan
+          decision: APPROVE
+          connector: email
+          config:
+            type: email
+            to: "uzairtajmat7@gmail.com"
+            subject: "Demand plan — reorders to dispatch & near-expiry to liquidate (all stores)"
+            body: >-
+              Approved demand plan per (store, SKU). Reorder rows should be
+              dispatched to the sales channel; liquidate rows are perishing
+              overstock to mark down or transfer. Plan (with recommendation per
+              row): {{facts.demand_plan}}.
+
+        - name: hold_no_action
+          decision: REJECT
+          connector: notify
+          config:
+            type: notify
+            recipient: demand_planning_team
+            message: "Demand/dispatch plan reviewed and held — no orders placed this run."
+
+        - name: escalate_review
+          decision: ESCALATE
+          connector: simulated
+          config:
+            type: simulated
+            note: "Demand/dispatch plan escalated for human review."
