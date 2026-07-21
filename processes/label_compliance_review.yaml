@@ -124,7 +124,7 @@ processes:
             summary: On-pack artwork currently in market.
             views:
               - { view: image, from: current_artwork_url }
-              - { view: image, from: reviewer_file_url }
+              - { view: image, from: reviewer_file_urls }
           - title: Required Label Changes
             summary: Field-level edits the designer must make.
             views:
@@ -180,15 +180,15 @@ processes:
           flag any that are license_blocking, and set print_recommendation to REJECT if
           any license_blocking item is unsatisfied, else APPROVE.
         skill:
-          # compliance-verifier/verify_artifact reads the file (PDF or image) and runs
-          # multimodal vision + the FSSAI checklist in one call (no separate OCR/vision
-          # skill needed). file_path is the reviewer's uploaded artwork.
+          # compliance-verifier/verify_artifact reads EVERY uploaded file (image or PDF)
+          # and runs multimodal vision + the FSSAI checklist in one call. When no
+          # checklist is seeded it falls back to a freeform FSSAI mandatory-declaration
+          # review, so it always returns real findings. file_paths = ALL attached files.
           name: compliance-verifier
           operation: verify_artifact
           args:
-            program_id: fssai_labelling          # TODO: seed this checklist first (upload FSSAI
-                                                  #       Labelling & Display Regs -> compliance-parser)
-            file_path: '{{reviewer_file}}'        # the artwork the reviewer attached at submit_completed_label
+            program_id: fssai_labelling
+            file_paths: '{{reviewer_files}}'      # front + back — all files attached at submit_completed_label
             criticality: license_blocking
             model: gemini
           as: fssai_verify
@@ -217,7 +217,7 @@ processes:
           - title: Completed Label (uploaded)
             summary: The finished artwork the reviewer submitted for verification.
             views:
-              - { view: image, from: reviewer_file_url }
+              - { view: image, from: reviewer_file_urls }
           - title: FSSAI Verdicts (completed label)
             summary: Checklist result from image analysis of the uploaded artwork.
             views:
