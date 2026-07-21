@@ -184,7 +184,8 @@ processes:
           # and runs multimodal vision + the FSSAI checklist in one call. When no
           # checklist is seeded it falls back to a freeform FSSAI mandatory-declaration
           # review, so it always returns real findings. file_paths = ALL attached files.
-          name: compliance-verifier
+          name: Genzoic Compliance Verifier   # registered Integration name (run_skill matches id/name; the
+                                              # subprocess only gets PYTHONPATH+DB when the name starts with "Genzoic")
           operation: verify_artifact
           args:
             program_id: fssai_labelling
@@ -280,7 +281,7 @@ processes:
       # Tool scope: only the compliance skills the steps call — nothing else offered.
       tools:
         skills:
-          - compliance-verifier
-          - compliance-parser
-          - compliance-change-scanner
+          - Genzoic Compliance Verifier
+          - Compliance PDF Parser
+          - Genzoic Compliance Change Scanner
         allow_unlisted_skills: false
