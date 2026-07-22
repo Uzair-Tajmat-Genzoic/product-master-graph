@@ -53,10 +53,15 @@ processes:
         instruction: >
           From product_label_facts, summarise the SKU's current on-pack declarations
           (name, veg/non-veg, serving size, MRP, shelf life, barcode, labelling
-          compliance status) and identify the current label artwork URL from
-          IMAGES_LINK. Output label_facts (a concise structured summary),
-          current_artwork_url, and label_file_status: set it to "found" when a usable
-          artwork URL exists, otherwise "missing".
+          compliance status). For the artwork: the system CANNOT automatically
+          download files from a cloud-storage FOLDER link (e.g. a Google Drive
+          folder URL like drive.google.com/drive/folders/...) or any non-direct
+          URL. So set label_file_status = "missing" and leave current_artwork_url
+          empty UNLESS IMAGES_LINK is a direct, downloadable image/PDF file URL —
+          only then set current_artwork_url to it and label_file_status = "found".
+          Never claim the artwork is accessible when it is only a folder link.
+          Output label_facts (a concise structured summary), current_artwork_url,
+          and label_file_status.
         produces:
           - label_facts
           - current_artwork_url
@@ -69,12 +74,17 @@ processes:
         type: decision
         after: assemble_label_context
         condition: '{{label_file_status}} == "missing"'
-        description: No label artwork on record — reviewer uploads the current label file.
+        description: The label file could not be fetched — reviewer provides it.
         instruction: >
-          No current label artwork was found for this SKU. Attach the current label
-          file (image or PDF) and approve so it can be used for the compliance review,
-          or reject if it is unavailable.
-        decision_options: [APPROVE, REJECT]
+          The current label artwork could NOT be fetched automatically — the on-record
+          IMAGES_LINK is only a cloud-storage folder link, not a downloadable file. The
+          reviewer must provide the label file(s) before the compliance review can run.
+          Recommend "Upload artwork file". In your reasons, state plainly that the label
+          files are not directly accessible / could not be fetched, and that they must be
+          uploaded to proceed to the next step. The alternatives at this stage are
+          "Fetch from cloud storage" (retrieve from the storage link — not yet automated)
+          and "Evaluate artwork" (proceed to assess with whatever is available).
+        decision_options: ["Upload artwork file", "Fetch from cloud storage", "Evaluate artwork"]
         produces:
           - current_label_provided
         key_data:
@@ -90,13 +100,26 @@ processes:
         after: provide_current_label
         description: Derive the field-level label edits required by the change.
         instruction: >
-          Given change_kind (regulation or formulation) and the current label_facts,
-          determine the concrete label edits now required. For a regulation change,
-          reason about the new FSSAI labelling obligation vs what the label declares;
-          for a formulation change, about ingredient / allergen / nutrition / claim
-          deltas. Output required_changes as a list, each with {field, current_value,
-          new_required_value, driving_clause}. Give a one-line change_rationale and
-          rate change_severity as license_blocking, must_have, or good_to_have.
+          Produce a concrete, field-level list of label edits to make on this SKU.
+          Reason over: (a) product_label_facts and label_facts (current on-pack
+          declarations); (b) GATHERED CONTEXT — the SKU's related graph entities
+          (allergens, ingredients, nutrients, claims) when present; and (c) the
+          FSSAI packaged-food mandatory declarations that every label must carry.
+          You MUST return a non-empty required_changes list. Even when the exact
+          new regulation clause is not supplied, walk the FSSAI mandatory
+          declarations and, for EACH, emit an entry checking the current label
+          against it: FSSAI logo + 14-digit licence number; name of food;
+          ingredient list in descending order of weight; allergen declaration
+          (contains / may contain) in the mandated format; nutritional information
+          panel (energy, protein, carbohydrate incl. sugars, fat) per 100 g/ml
+          AND per serving; veg/non-veg symbol; net quantity; mfg & use-by/expiry
+          date; batch/lot; MRP; name & address of manufacturer; storage
+          instructions; country of origin. For a formulation change, additionally
+          flag ingredient / allergen / nutrition / claim deltas from the gathered
+          context. For each change output {field, current_value (from the facts, or
+          "not declared" if absent), new_required_value, driving_clause}. Give a
+          one-line change_rationale and rate change_severity overall as
+          license_blocking, must_have, or good_to_have.
         produces:
           - required_changes
           - change_rationale
@@ -124,11 +147,13 @@ processes:
             summary: On-pack artwork currently in market.
             views:
               - { view: image, from: current_artwork_url }
-              - { view: image, from: reviewer_file_url }
+              - { view: image, from: reviewer_file_urls }
           - title: Required Label Changes
             summary: Field-level edits the designer must make.
             views:
-              - { view: markdown, from: required_changes }
+              - view: table
+                from: required_changes
+                columns: [field, current_value, new_required_value, driving_clause]
 
       # 4. Emit the structured change request to the design team (simulated).
       - id: send_change_request
@@ -164,7 +189,9 @@ processes:
         key_data:
           - title: Change Request (recap)
             views:
-              - { view: markdown, from: required_changes }
+              - view: table
+                from: required_changes
+                columns: [field, current_value, new_required_value, driving_clause]
 
       # 6. Verify the COMPLETED label against FSSAI guidelines — checklist + image
       #    analysis in one multimodal call over the reviewer's uploaded file.
@@ -180,15 +207,16 @@ processes:
           flag any that are license_blocking, and set print_recommendation to REJECT if
           any license_blocking item is unsatisfied, else APPROVE.
         skill:
-          # compliance-verifier/verify_artifact reads the file (PDF or image) and runs
-          # multimodal vision + the FSSAI checklist in one call (no separate OCR/vision
-          # skill needed). file_path is the reviewer's uploaded artwork.
-          name: compliance-verifier
+          # compliance-verifier/verify_artifact reads EVERY uploaded file (image or PDF)
+          # and runs multimodal vision + the FSSAI checklist in one call. When no
+          # checklist is seeded it falls back to a freeform FSSAI mandatory-declaration
+          # review, so it always returns real findings. file_paths = ALL attached files.
+          name: Genzoic Compliance Verifier   # registered Integration name (run_skill matches id/name; the
+                                              # subprocess only gets PYTHONPATH+DB when the name starts with "Genzoic")
           operation: verify_artifact
           args:
-            program_id: fssai_labelling          # TODO: seed this checklist first (upload FSSAI
-                                                  #       Labelling & Display Regs -> compliance-parser)
-            file_path: '{{reviewer_file}}'        # the artwork the reviewer attached at submit_completed_label
+            program_id: fssai_labelling
+            file_paths: '{{reviewer_files}}'      # front + back — all files attached at submit_completed_label
             criticality: license_blocking
             model: gemini
           as: fssai_verify
@@ -217,7 +245,7 @@ processes:
           - title: Completed Label (uploaded)
             summary: The finished artwork the reviewer submitted for verification.
             views:
-              - { view: image, from: reviewer_file_url }
+              - { view: image, from: reviewer_file_urls }
           - title: FSSAI Verdicts (completed label)
             summary: Checklist result from image analysis of the uploaded artwork.
             views:
@@ -277,10 +305,10 @@ processes:
               from: product_label_facts
               columns: [SKU, DISPLAY_NAME, VEG_NONVEG, SERVING_SIZE, MRP_INR, SHELF_LIFE_DAYS, ORG_LABELLING_COMPLIANCE]
 
-      # Tool scope: only the compliance skills the steps call — nothing else offered.
+      # Tool scope: the agent's DECISION gates don't call skills at all (the only
+      # skill use is the hard-wired verify_completed_label STEP, which bypasses this
+      # scope). An empty list stops the agent from wandering off to call the
+      # change-scanner / unrelated skills with a bogus program_id during decisions.
       tools:
-        skills:
-          - compliance-verifier
-          - compliance-parser
-          - compliance-change-scanner
+        skills: []
         allow_unlisted_skills: false
