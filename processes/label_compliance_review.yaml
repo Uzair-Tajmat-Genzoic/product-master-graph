@@ -100,13 +100,26 @@ processes:
         after: provide_current_label
         description: Derive the field-level label edits required by the change.
         instruction: >
-          Given change_kind (regulation or formulation) and the current label_facts,
-          determine the concrete label edits now required. For a regulation change,
-          reason about the new FSSAI labelling obligation vs what the label declares;
-          for a formulation change, about ingredient / allergen / nutrition / claim
-          deltas. Output required_changes as a list, each with {field, current_value,
-          new_required_value, driving_clause}. Give a one-line change_rationale and
-          rate change_severity as license_blocking, must_have, or good_to_have.
+          Produce a concrete, field-level list of label edits to make on this SKU.
+          Reason over: (a) product_label_facts and label_facts (current on-pack
+          declarations); (b) GATHERED CONTEXT — the SKU's related graph entities
+          (allergens, ingredients, nutrients, claims) when present; and (c) the
+          FSSAI packaged-food mandatory declarations that every label must carry.
+          You MUST return a non-empty required_changes list. Even when the exact
+          new regulation clause is not supplied, walk the FSSAI mandatory
+          declarations and, for EACH, emit an entry checking the current label
+          against it: FSSAI logo + 14-digit licence number; name of food;
+          ingredient list in descending order of weight; allergen declaration
+          (contains / may contain) in the mandated format; nutritional information
+          panel (energy, protein, carbohydrate incl. sugars, fat) per 100 g/ml
+          AND per serving; veg/non-veg symbol; net quantity; mfg & use-by/expiry
+          date; batch/lot; MRP; name & address of manufacturer; storage
+          instructions; country of origin. For a formulation change, additionally
+          flag ingredient / allergen / nutrition / claim deltas from the gathered
+          context. For each change output {field, current_value (from the facts, or
+          "not declared" if absent), new_required_value, driving_clause}. Give a
+          one-line change_rationale and rate change_severity overall as
+          license_blocking, must_have, or good_to_have.
         produces:
           - required_changes
           - change_rationale
@@ -138,7 +151,9 @@ processes:
           - title: Required Label Changes
             summary: Field-level edits the designer must make.
             views:
-              - { view: markdown, from: required_changes }
+              - view: table
+                from: required_changes
+                columns: [field, current_value, new_required_value, driving_clause]
 
       # 4. Emit the structured change request to the design team (simulated).
       - id: send_change_request
@@ -174,7 +189,9 @@ processes:
         key_data:
           - title: Change Request (recap)
             views:
-              - { view: markdown, from: required_changes }
+              - view: table
+                from: required_changes
+                columns: [field, current_value, new_required_value, driving_clause]
 
       # 6. Verify the COMPLETED label against FSSAI guidelines — checklist + image
       #    analysis in one multimodal call over the reviewer's uploaded file.
