@@ -31,7 +31,7 @@ kpis:
       query_template: |
         -- forecast vs BUSINESS_ANALYTICS actuals, per SKU, trailing 30 days
         SELECT SKU_ID, 100 - AVG(ABS(err)) AS accuracy_pct FROM ...
-    related_processes: [shelf_life_liquidation, demand_forecast_dispatch]
+    related_processes: [shelf_life_liquidation, demand_forecast]
 
   - id: AvgStoreRating
     name: Average Store Rating

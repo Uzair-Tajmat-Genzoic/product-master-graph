@@ -6,11 +6,22 @@ processes:
     name: Shelf-Life Risk Monitoring
     description: |
       Monitors inventory age across dark-store locations against each SKU's
-      remaining shelf life and flags SKUs at risk of wastage before the window
-      closes. After the reviewer confirms, the action is to email the
-      supply-chain owner the at-risk report.
+      remaining shelf life and flags SKUs at risk before the wastage window
+      closes, then emails the supply-chain owner the at-risk report on approval.
+
+      For the agent: `at_risk_products` is ALREADY assembled and filtered by the
+      system to at-risk (store, SKU) rows only — rolled up from each store's
+      latest inventory snapshot and scored against that pair's configured
+      thresholds (from the stock_config_for edge). Each row carries a `risk_type`:
+      `wastage` (near expiry), `low_stock` (below safety stock), `critical_low`
+      (below the hard floor) or `both`. Do NOT re-filter or re-list every row.
+      Write a SHORT summary: how many SKUs are near-expiry vs low on stock, across
+      how many stores, and call out the most urgent (smallest days_to_expiry, plus
+      any critical_low/both). Recommend APPROVE to email the report; if
+      `at_risk_products` is empty, recommend no action.
     domain: SupplyChain
     owner: supply_chain_team
+    definition_type: text
 
     # Attach to every Store (the filter binding is what lets a manual run find it).
     applies_to:
@@ -25,15 +36,62 @@ processes:
       - { type: event, event_type: shelf_life_risk }
       - { type: manual, allowed_roles: [SupplyPlanner, DemandPlanner] }
 
+    # What the event carries in. Scheduled sweep carries none; a manual/entity run
+    # may pin one store. (Documentation for the new definition shape — runtime reads
+    # entities off the event, not this block.)
+    inputs:
+      - { name: store_id, type: reference, references: Store, required: false }
+      - { name: scheduled_at, type: datetime, required: false }
+
+    # What the decision yields.
+    outputs:
+      - { name: decision, type: enum, values: [APPROVE, REJECT, ESCALATE] }
+      - { name: at_risk_products, type: object }
+
     # Descriptive stages shown in the "Process stages" panel (modeled in the graph).
     # DISPLAY ONLY — metadata.steps_display_only keeps the executor on the approve-gate
     # path so the email action still fires (not routed into the StepRunner).
     steps:
-      - { id: collect_inventory, name: "Collect current inventory", type: automated, description: "Read each store's latest inventory snapshot (sellable, non-expired stock)." }
-      - { id: thresholds,        name: "Attach shelf-life thresholds", type: automated, after: collect_inventory, description: "Walk stock_config_for to bring each (SKU, store)'s configured thresholds." }
-      - { id: assess,            name: "Assess risk", type: automated, after: thresholds, description: "Roll up per (store, SKU) and flag wastage / low-stock / critical risk." }
-      - { id: review,            name: "Supply owner review", type: human, after: assess, description: "Supply-chain owner reviews the at-risk report and approves / rejects / revises." }
-      - { id: notify,            name: "Email at-risk report", type: automated, after: review, description: "On approve: email the supply-chain owner the at-risk report." }
+      - id: collect_inventory
+        name: Collect current inventory
+        type: agent
+        description: Read each store's latest inventory snapshot (sellable, non-expired stock).
+        instruction: For every store, read the latest STORE_INVENTORY_DAILY snapshot and keep only non-expired, sellable batches.
+        produces: [current_inventory]
+      - id: thresholds
+        name: Attach shelf-life thresholds
+        type: agent
+        after: collect_inventory
+        description: Walk stock_config_for to bring each (SKU, store)'s configured thresholds.
+        instruction: For each (SKU, store) walk the stock_config_for edge and attach min_days_shelf_life, min_count and absolute_risk_count.
+        produces: [thresholds]
+      - id: assess
+        name: Assess risk
+        type: agent
+        after: thresholds
+        description: Roll up per (store, SKU) and flag wastage / low-stock / critical risk.
+        instruction: Roll up to one row per (store, SKU); classify each as wastage, low_stock, critical_low or both against its thresholds and drop the rest.
+        produces: [at_risk_products]
+      - id: review
+        name: Supply owner review
+        type: decision
+        after: assess
+        description: Supply-chain owner reviews the at-risk report and approves / rejects / revises.
+        instruction: Review the at-risk report and APPROVE to email it, REJECT to hold, or REVISE with changes.
+        decision_options: [APPROVE, REJECT, ESCALATE]
+      - id: notify
+        name: Email at-risk report
+        type: notify
+        after: review
+        description: On approve, format the at-risk report as a Genzoic HTML email (via the Genzoic Email Formatter skill) and send it to the supply-chain owner.
+        instruction: On approve, email the supply-chain owner the formatted at-risk report.
+
+    # What to remember across runs (aspirational — not yet consumed at runtime).
+    learning: |
+      Persist, per (store, SKU), which risk_type recurs and whether the owner
+      acted (transfer / markdown / ignored). Surface repeat offenders first.
+
+    related_kpis: [WastageRisk]   # must reference KPIs defined in master_data/kpis.yaml (unknown = fatal at apply)
 
     # Everything the orchestrator actually reads at run time.
     metadata:
@@ -42,6 +100,12 @@ processes:
       priority: 10
       requires_human_approval: true
       steps_display_only: true      # steps above are descriptive — do NOT run the StepRunner
+
+      # Scope the agent's ToolBelt: this process reasons purely over the graph +
+      # the context_package facts below, so it needs NO external skills. An empty
+      # list keeps the agent prompt tight and blocks unrelated skill calls.
+      tools:
+        skills: []
 
       # Gather before the reviewer sees anything. Graph-native traversal:
       #   START at Store nodes -> follow the Store->STORE_INVENTORY_DAILY link
@@ -118,28 +182,57 @@ processes:
               - { field: product_sku, type: Product, as: product_name }
         - { key: scheduled_at, source: event, required: false }
 
+      # "Data used" cards shown to the reviewer at the decision gate (KeyData
+      # carousel). `from` must resolve to a context_package key above; the UI
+      # supports table / markdown / image views only. `columns` trims the
+      # assembled table to the reviewer-facing set.
+      key_data:
+        - title: "At-risk inventory (near-expiry & low-stock)"
+          summary: "Flagged (store, SKU) pairs with risk type, most-urgent first"
+          views:
+            - { view: table, from: at_risk_products, columns: [store_name, product_name, risk_type, total_available, days_to_expiry, soonest_expiry, batches] }
+
       # Tells the recommender the data is pre-filtered — just summarise and approve.
+      # NOTE: policy_rules is documentation only — the EventAgent reads `description`
+      # (the TASK), not this block; the key guidance is folded into description above.
       policy_rules:
         - "`at_risk_products` has ALREADY been assembled and filtered by the system to at-risk (store, SKU) rows only, rolled up from the latest inventory snapshot and scored against each pair's configured thresholds (from the stock_config_for edge). Each row has a `risk_type`: `wastage` (near expiry: 0 <= days_to_expiry <= min_days_shelf_life; already-expired stock is excluded), `low_stock` (total_available <= min_count), `critical_low` (total_available <= absolute_risk_count), or `both`. Do NOT re-filter or re-list every row."
         - "Write a SHORT decision summary in plain business language covering BOTH risks: how many SKUs are near-expiry (wastage) vs running low on stock, across how many stores, and call out the most urgent — smallest days_to_expiry for wastage, and any `critical_low`/`both` rows. Example tone: 'Store 100008: 3 SKUs expiring within 2 days and 2 SKUs critically low; 6 stores affected overall.' Do not paste the table."
         - "Recommend APPROVE to email the supply-chain owner the combined at-risk report so the manual daily monitoring is captured in writing. If `at_risk_products` is empty, recommend no action (nothing is at risk today)."
 
       # What runs per decision: APPROVE emails the report; REJECT/ESCALATE don't.
+      #
+      # APPROVE calls the "Genzoic Email Formatter" skill (action type: skill) instead
+      # of the plain `email` action, so the at-risk rows render as a clean Genzoic HTML
+      # table + plain-text fallback and go out via the org's SendGrid email connector.
+      # `args.sections[].records` binds to the assembled at_risk_products fact (a list of
+      # row dicts); `columns` picks + orders the fields the reviewer card shows. Config
+      # values support `{{facts.*}}` templating (single-token → native value preserved).
       actions:
         - name: email_at_risk_report
           decision: APPROVE
-          connector: email
+          connector: skill
           config:
-            type: email
-            to: "uzairtajmat7@gmail.com"
-            subject: "Inventory risk — near-expiry & low-stock SKUs (all stores)"
-            body: >-
-              The scheduled inventory sweep flagged at-risk (store, SKU) pairs
-              across all dark stores — both wastage risk (nearing expiry) and
-              low-stock risk (below configured safety stock), each scored against
-              the pair's own thresholds. At-risk rows (risk_type per row):
-              {{facts.at_risk_products}}. Please action transfers / markdowns for
-              near-expiry stock and replenishment for low-stock SKUs.
+            type: skill
+            skill: "Genzoic Email Formatter"     # registered Integration name (run_skill matches id/name;
+                                                  # subprocess gets DB + app imports because it starts with "Genzoic")
+            operation: send
+            args:
+              to: "uzairtajmat7@gmail.com"
+              subject: "Inventory risk - near-expiry & low-stock SKUs (all stores)"
+              title: "Shelf-Life Risk - Daily Inventory Report"
+              intro: >-
+                The scheduled inventory sweep flagged the at-risk (store, SKU) pairs below
+                across all dark stores - both wastage risk (nearing expiry) and low-stock
+                risk (below configured safety stock), each scored against the pair's own
+                thresholds. Please action transfers / markdowns for near-expiry stock and
+                replenishment for low-stock SKUs.
+              sections:
+                - type: table
+                  caption: "At-risk (store, SKU) pairs - most urgent first"
+                  columns: [store_name, product_name, risk_type, total_available, days_to_expiry, soonest_expiry, batches]
+                  records: "{{facts.at_risk_products}}"
+              footer_note: "Generated automatically by the Shelf-Life Risk Monitoring process."
 
         - name: hold_no_action
           decision: REJECT
