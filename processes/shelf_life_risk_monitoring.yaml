@@ -214,7 +214,7 @@ processes:
           connector: skill
           config:
             type: skill
-            skill: "Genzoic Email Formatter"     # registered Integration name (run_skill matches id/name;
+            skill: "genzoic-email-formatter"     # Skill.name (slug) — call_skill resolves by Skill.name;
                                                   # subprocess gets DB + app imports because it starts with "Genzoic")
             operation: send
             args:
