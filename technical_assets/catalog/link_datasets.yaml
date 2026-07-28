@@ -64,6 +64,21 @@ datasets:
     columns: [STORE_ID, SKU_ID, ITEM_SOURCE_NAME, QUANTITY, TOTAL, NET, ORDER_DATE, ORDER_STATE, ONLINE_ORDER_ID]
 
   # --- attached to Product ----------------------------------------------
+  # Static product truth (1:1 on SKU) from the PIM dataset, not bronze — hence
+  # `connection: pim_bq`, whose default dataset is ctx_upside_master_data.
+  # IMAGES_LINK is the Drive folder holding the SKU's label artwork; the
+  # label_compliance_review process reads it from here and lists that folder
+  # directly, instead of searching Drive by product name.
+  - entity_type: Product
+    name: Product label facts
+    description: On-pack declarations + label artwork Drive folder link (IMAGES_LINK) for this SKU (lazy, 1:1).
+    source_table: DIM_PRODUCT
+    connection: pim_bq
+    cardinality: "1:1"
+    join_keys:
+      - { entity_attribute: id, table_column: SKU }
+    columns: [SKU, DISPLAY_NAME, VEG_NONVEG, SIZE_LABEL, SIZE_GM, VERSION, STATUS, DESCRIPTION, IMAGES_LINK]
+
   - entity_type: Product
     name: Inventory batches
     description: Latest inventory snapshot for this product across stores (lazy).

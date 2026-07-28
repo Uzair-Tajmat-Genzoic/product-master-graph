@@ -2,12 +2,15 @@ version: 1
 
 processes:
   # Label Compliance Review — when a regulation (FSSAI) or a product formulation
-  # changes, identify the required label edits, brief the designer with a
-  # structured change request (GATE: brief_designer), let the reviewer upload the
-  # finished artwork (GATE: submit_completed_label), verify it against the FSSAI
-  # labelling checklist via image analysis, then approve for print (GATE:
-  # approve_for_print). If the SKU has no label file on record, the reviewer is
-  # asked to upload it up front (conditional GATE: provide_current_label).
+  # changes, DOWNLOAD the SKU's current label artwork from its Google Drive link
+  # (IMAGES_LINK) via the google-drive skill (standard Drive API), run the FSSAI labelling
+  # checklist against the downloaded file (image analysis), identify the required
+  # label edits, brief the designer with a structured change request (GATE:
+  # brief_designer), let the reviewer submit the finished artwork (GATE:
+  # submit_completed_label), verify it against the FSSAI checklist, then approve
+  # for print (GATE: approve_for_print). If the label file cannot be downloaded
+  # from Drive, the reviewer is asked to upload it to Drive up front (conditional
+  # GATE: provide_current_label).
   #
   # Stepped/agentic mode: real `steps` with type agent|decision|notify and NO
   # metadata.steps_display_only, so the EventAgent walks them (context_graph_client.py:725).
@@ -42,54 +45,138 @@ processes:
       - { name: target_market, type: string }
 
     outputs:
-      - { name: print_decision, type: enum, values: [APPROVE, REJECT] }
+      - { name: print_decision, type: enum, values: ["Send to Final Printing", "REJECT"] }
 
     steps:
-      # 1. Summarise the SKU's current on-pack declarations; locate its artwork.
+      # 1. Summarise the SKU's current on-pack declarations; capture its Google Drive
+      #    artwork link (for display/audit). The actual file download runs in the next
+      #    step (download_label_from_drive) via the google-drive skill.
       - id: assemble_label_context
         name: Assemble Label Context
         type: agent
-        description: Summarise what the current label declares and locate its artwork file.
+        description: Summarise what the current label declares and capture its Google Drive artwork link.
         instruction: >
           From product_label_facts, summarise the SKU's current on-pack declarations
           (name, veg/non-veg, serving size, MRP, shelf life, barcode, labelling
-          compliance status). For the artwork: the system CANNOT automatically
-          download files from a cloud-storage FOLDER link (e.g. a Google Drive
-          folder URL like drive.google.com/drive/folders/...) or any non-direct
-          URL. So set label_file_status = "missing" and leave current_artwork_url
-          empty UNLESS IMAGES_LINK is a direct, downloadable image/PDF file URL —
-          only then set current_artwork_url to it and label_file_status = "found".
-          Never claim the artwork is accessible when it is only a folder link.
-          Output label_facts (a concise structured summary), current_artwork_url,
-          and label_file_status.
+          compliance status). For the artwork: read IMAGES_LINK — this is the Google
+          Drive location of the label artwork (a Drive file URL, a Drive folder URL,
+          or a bare file id). Output drive_label_link set to the IMAGES_LINK value
+          verbatim (an empty string if IMAGES_LINK is absent); it is kept for
+          display/audit. The label file itself is downloaded from Google Drive in the
+          NEXT step (download_label_from_drive) via the google-drive skill. Output
+          label_facts (a concise structured summary) and drive_label_link.
         produces:
           - label_facts
+          - drive_label_link
+
+      # 1a. Download the label artwork from the SKU's Google Drive folder via the
+      #     google-drive SKILL (standard Drive API, download_folder op — Shared-Drive
+      #     aware). Authenticates with the workspace-connector OAuth token, bridged into
+      #     the skill by run_skill (script_executor INTEGRATION_CONFIG.credentials).
+      - id: download_label_from_drive
+        name: Download Label File from Google Drive
+        type: agent
+        after: assemble_label_context
+        description: Download the SKU's current label artwork from its Google Drive folder via the Drive API skill.
+        instruction: >
+          Review drive_download the result of the google-drive skill's download_folder
+          operation over the SKU's Drive folder (images_link). If drive_download.file_paths is
+          non-empty, set label_file_status = "found", current_artwork_files to that list of
+          local file paths (drive_download.file_paths — used by the FSSAI verify step), and
+          current_artwork_url to drive_download.file_urls (the served /api/... URLs, used to
+          render the image in the UI). If nothing was downloaded (empty folder, missing/blank
+          images_link, or an error in drive_download), set label_file_status = "missing" and
+          leave current_artwork_files and current_artwork_url empty. Never claim a file is
+          available when none was downloaded.
+        skill:
+          # Standard Google Drive API via the google-drive script skill. download_folder
+          # lists the folder (Shared Drive aware) and downloads every file to local paths.
+          # It authenticates with the workspace-connector OAuth token bridged in by
+          # run_skill (script_executor INTEGRATION_CONFIG.credentials).
+          name: google-drive
+          operation: download_folder
+          args:
+            folder_id: '{{images_link}}'   # the real Drive folder URL read from the entity
+            export_format: pdf
+          as: drive_download
+        produces:
+          - current_artwork_files
           - current_artwork_url
           - label_file_status
+        key_data:
+          - title: Downloaded Label (from Drive)
+            summary: The current label artwork downloaded from the SKU's Google Drive folder.
+            views:
+              - { view: image, from: drive_download.file_urls }
 
-      # 1b. CONDITIONAL GATE — if the SKU has no label file on record, ask the reviewer
-      #     to upload the current label. Skipped when the artwork was found.
+      # 1b. Verify the DOWNLOADED current label against FSSAI guidelines straight away —
+      #     checklist + image analysis over the file(s) fetched from Drive. Runs only
+      #     when the Drive download succeeded.
+      - id: verify_current_label
+        name: Verify Current Label (FSSAI + Image Analysis)
+        type: agent
+        after: download_label_from_drive
+        condition: '{{label_file_status}} == "found"'
+        description: Run the FSSAI labelling checklist against the label file downloaded from Drive.
+        instruction: >
+          Review the compliance-verifier result for the CURRENT label downloaded from Google
+          Drive. Summarise the FSSAI verdicts, list every checklist item that is not_satisfied
+          or unclear, and flag any that are license_blocking. This assesses the on-market label
+          as it stands today and feeds the change identification that follows.
+        skill:
+          # compliance-verifier/verify_artifact reads EVERY file (image or PDF) and runs
+          # multimodal vision + the FSSAI checklist in one call. file_paths = the file(s)
+          # downloaded from Drive at download_label_from_drive.
+          name: Genzoic Compliance Verifier
+          operation: verify_artifact
+          args:
+            program_id: fssai_labelling
+            file_paths: '{{current_artwork_files}}'
+            criticality: license_blocking
+            model: gemini
+          as: fssai_current_verify
+        produces:
+          - current_label_verdicts
+          - current_unsatisfied_items
+        key_data:
+          - title: Current Label (downloaded from Drive)
+            summary: The label file fetched from Google Drive and assessed.
+            views:
+              - { view: image, from: drive_download.file_urls }
+          - title: FSSAI Verdicts (current label)
+            summary: Checklist result from image analysis of the downloaded label.
+            views:
+              - { view: markdown, from: current_label_verdicts }
+          - title: Unsatisfied / Blocking Items (current label)
+            views:
+              - { view: table, from: current_unsatisfied_items }
+
+      # 1c. CONDITIONAL GATE — if the label file could NOT be downloaded from Drive, the
+      #     reviewer retries the download (after adding the artwork to Drive themselves) or
+      #     proceeds to evaluate with what's available. Skipped when the download succeeded.
       - id: provide_current_label
         name: Provide Current Label File
         type: decision
-        after: assemble_label_context
+        after: download_label_from_drive
         condition: '{{label_file_status}} == "missing"'
-        description: The label file could not be fetched — reviewer provides it.
+        description: The label file could not be downloaded from Drive — reviewer retries or proceeds.
         instruction: >
-          The current label artwork could NOT be fetched automatically — the on-record
-          IMAGES_LINK is only a cloud-storage folder link, not a downloadable file. The
-          reviewer must provide the label file(s) before the compliance review can run.
-          Recommend "Upload artwork file". In your reasons, state plainly that the label
-          files are not directly accessible / could not be fetched, and that they must be
-          uploaded to proceed to the next step. The alternatives at this stage are
-          "Fetch from cloud storage" (retrieve from the storage link — not yet automated)
-          and "Evaluate artwork" (proceed to assess with whatever is available).
-        decision_options: ["Upload artwork file", "Fetch from cloud storage", "Evaluate artwork"]
+          The current label artwork could NOT be downloaded from the on-record Google Drive
+          link (IMAGES_LINK) — the link may point to an empty or inaccessible folder, the file
+          may be missing, or access may be denied. This system CANNOT upload files to Google
+          Drive — the reviewer must add the label artwork to the SKU's Google Drive folder
+          themselves (outside this system), then retry. Recommend "Retry Drive download":
+          re-attempt the Google Drive download (use this once the artwork has been placed in the
+          Drive folder). In your reasons, state plainly that the label file could not be
+          downloaded and that the artwork must be added to the SKU's Google Drive folder before
+          retrying. The alternative is "Evaluate artwork" (proceed to assess with whatever is
+          available).
+        decision_options: ["Retry Drive download", "Evaluate artwork"]
         produces:
           - current_label_provided
         key_data:
           - title: Current Label Facts
-            summary: What the SKU currently declares (no artwork file on record).
+            summary: What the SKU currently declares (label file not downloadable from Drive).
             views:
               - { view: table, from: product_label_facts }
 
@@ -97,14 +184,20 @@ processes:
       - id: identify_required_changes
         name: Identify Required Label Changes
         type: agent
-        after: provide_current_label
+        # Reconverges both branches: the download-succeeded path (verify_current_label)
+        # and the download-failed path (provide_current_label). Whichever was skipped is
+        # a no-op, so this runs once either way.
+        after: [verify_current_label, provide_current_label]
         description: Derive the field-level label edits required by the change.
         instruction: >
           Produce a concrete, field-level list of label edits to make on this SKU.
           Reason over: (a) product_label_facts and label_facts (current on-pack
           declarations); (b) GATHERED CONTEXT — the SKU's related graph entities
-          (allergens, ingredients, nutrients, claims) when present; and (c) the
-          FSSAI packaged-food mandatory declarations that every label must carry.
+          (allergens, ingredients, nutrients, claims) when present; (c) the
+          FSSAI packaged-food mandatory declarations that every label must carry;
+          and (d) current_label_verdicts / current_unsatisfied_items — the FSSAI
+          findings from the label downloaded from Google Drive (when present, prioritise
+          fixing every not_satisfied / license_blocking item they list).
           You MUST return a non-empty required_changes list. Even when the exact
           new regulation clause is not supplied, walk the FSSAI mandatory
           declarations and, for EACH, emit an entry checking the current label
@@ -133,20 +226,24 @@ processes:
         description: Compliance lead approves the structured change request for design.
         instruction: >
           Review the structured change request (required_changes) against the current
-          label. Approve to release it to the design team, or revise. Recommend APPROVE
-          only when the required changes are complete and unambiguous.
-        decision_options: [APPROVE, REVISE]
+          label. Choose "Send to Designer" to route the required edits to the design
+          team (they revise the artwork, the reviewer uploads it, and it is FSSAI-verified
+          before print). Choose "Push to Print" ONLY when the current label already needs
+          no changes and can go straight to print approval. Recommend "Send to Designer"
+          whenever there are outstanding required_changes; recommend "Push to Print" only
+          when the label is already fully compliant.
+        decision_options: ["Send to Designer", "Push to Print"]
         rationale_from: change_rationale
         produces:
-          - change_request_approved
+          - designer_route
         # Show the current label IMAGE alongside the required edits. Prefer the
         # on-record artwork URL; fall back to the file the reviewer uploaded at
         # provide_current_label (served via the app proxy, fetched by the ImageView).
         key_data:
           - title: Current Label
-            summary: On-pack artwork currently in market.
+            summary: On-pack artwork currently in market (downloaded from Google Drive).
             views:
-              - { view: image, from: current_artwork_url }
+              - { view: image, from: drive_download.file_urls }
               - { view: image, from: reviewer_file_urls }
           - title: Required Label Changes
             summary: Field-level edits the designer must make.
@@ -160,6 +257,7 @@ processes:
         name: Send Change Request to Designer
         type: notify
         after: brief_designer
+        condition: '{{designer_route}} == "Send to Designer"'
         description: Deliver the approved change request to the design team.
         produces:
           - change_request_sent
@@ -178,12 +276,13 @@ processes:
         name: Submit Completed Label
         type: decision
         after: send_change_request
+        condition: '{{designer_route}} == "Send to Designer"'
         description: Reviewer attaches the finished label artwork to run the compliance check.
         instruction: >
           Once the design team returns the revised label, attach the completed artwork
-          file and approve to run the FSSAI compliance check on it. Reject if the label
-          is not ready.
-        decision_options: [APPROVE, REJECT]
+          file and choose "Run Compliance Check" to run the FSSAI compliance check on it.
+          Reject if the label is not ready.
+        decision_options: ["Run Compliance Check", "REJECT"]
         produces:
           - completed_label_submitted
         key_data:
@@ -199,13 +298,13 @@ processes:
         name: Verify Completed Label (FSSAI + Image Analysis)
         type: agent
         after: submit_completed_label
-        condition: '{{completed_label_submitted}} == "APPROVE"'
+        condition: '{{designer_route}} == "Send to Designer" and {{completed_label_submitted}} == "Run Compliance Check"'
         description: Run the FSSAI labelling checklist against the uploaded artwork.
         instruction: >
           Review the compliance-verifier result for the completed label. Summarise the
           FSSAI verdicts, list every checklist item that is not_satisfied or unclear,
           flag any that are license_blocking, and set print_recommendation to REJECT if
-          any license_blocking item is unsatisfied, else APPROVE.
+          any license_blocking item is unsatisfied, else "Send to Final Printing".
         skill:
           # compliance-verifier/verify_artifact reads EVERY uploaded file (image or PDF)
           # and runs multimodal vision + the FSSAI checklist in one call. When no
@@ -230,13 +329,13 @@ processes:
         name: Approve Label for Print
         type: decision
         after: verify_completed_label
-        condition: '{{completed_label_submitted}} == "APPROVE"'
+        condition: '{{designer_route}} == "Send to Designer" and {{completed_label_submitted}} == "Run Compliance Check"'
         description: Regulatory affairs approves or rejects the label for print.
         instruction: >
-          Review the FSSAI verification of the completed label. Recommend APPROVE for
-          print only when no license_blocking or not_satisfied items remain; otherwise
+          Review the FSSAI verification of the completed label. Recommend "Send to Final
+          Printing" only when no license_blocking or not_satisfied items remain; otherwise
           recommend REJECT and send it back to design.
-        decision_options: [APPROVE, REJECT]
+        decision_options: ["Send to Final Printing", "REJECT"]
         recommends: print_recommendation
         rationale_from: fssai_verdicts
         produces:
@@ -259,7 +358,11 @@ processes:
         name: Record Print Approval
         type: notify
         after: approve_for_print
-        condition: '{{print_decision}} == "APPROVE"'
+        # Runs on BOTH branches: the reviewer pushed straight to print at the
+        # designer gate, OR the Send-to-Designer branch reached print approval.
+        # designer_route is checked first so the `or` short-circuits before the
+        # (possibly unset) print_decision on the push-to-print path.
+        condition: '{{designer_route}} == "Push to Print" or {{print_decision}} == "Send to Final Printing"'
         description: Record that the label is approved for print.
         produces:
           - print_recorded
@@ -296,6 +399,20 @@ processes:
               - IMAGES_LINK
             limit: 1
 
+        # The SKU's label-artwork Drive FOLDER link lives on the resolved Product
+        # entity as the `images_link` property — populated on every tenant with NO
+        # dataset link required. (Sourcing it from the DIM_PRODUCT / V_PRODUCT_ENRICHED
+        # datasets left it EMPTY on tenants where those datasets aren't linked, so the
+        # Drive read agent had no real folder id and copied the literal "FOLDER_ID"
+        # placeholder from its instructions into the search query.) `source: graph`
+        # matches the key name to the entity property, so this returns the real URL.
+        - key: images_link
+          source: graph
+
+        # NOTE: the actual Drive DOWNLOAD is done by the `download_label_from_drive`
+        # STEP via the google-drive SKILL (standard Drive API, download_folder op),
+        # authenticated with the workspace-connector OAuth token.
+
       # Process-level "Data used" card (inherited by gates that don't override).
       key_data:
         - title: Product Label Facts
@@ -305,10 +422,13 @@ processes:
               from: product_label_facts
               columns: [SKU, DISPLAY_NAME, VEG_NONVEG, SERVING_SIZE, MRP_INR, SHELF_LIFE_DAYS, ORG_LABELLING_COMPLIANCE]
 
-      # Tool scope: the agent's DECISION gates don't call skills at all (the only
-      # skill use is the hard-wired verify_completed_label STEP, which bypasses this
-      # scope). An empty list stops the agent from wandering off to call the
-      # change-scanner / unrelated skills with a bogus program_id during decisions.
+      # Tool scope: the agent's DECISION gates don't call skills/connectors at all — the
+      # only skill use is in the hard-wired STEPS (download_label_from_drive via the
+      # google-drive script skill, and verify_current_label / verify_completed_label via
+      # the compliance-verifier), which run through run_skill and bypass this scope.
+      # Empty lists stop the agent from wandering off to unrelated skills/connectors
+      # during decisions.
       tools:
         skills: []
+        connectors: []
         allow_unlisted_skills: false
