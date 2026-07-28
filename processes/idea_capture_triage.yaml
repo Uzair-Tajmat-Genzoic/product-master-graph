@@ -38,7 +38,6 @@ processes:
         description: >
           Automatically queries BigQuery datasets to evaluate incoming idea concepts against
           existing pipeline ideas, prior rejections, and competitor market signals.
-        required_skill: find_similar_products
         # Un-truncated candidate read. WITHOUT this the step has no fetch/skill, so
         # _step_input_keys returns [] and every context_package list reaches the LLM
         # through _compact_facts, which previews any list >4 rows down to 4 — hiding
@@ -123,7 +122,6 @@ processes:
           Decomposes the idea into the ingredients it would plausibly need and matches each
           against the ingredient master. Every ingredient in that master is already used in a
           live SKU, so a match means "we already buy this" and a miss means net-new sourcing.
-        required_skill: check_ingredient_availability
         after: retrieve_concept_context
         # Step-level fetch (not context_package): _compact_facts previews long row
         # lists at 4 rows, so the 153-row master would arrive unusable. A step's own
@@ -171,7 +169,6 @@ processes:
           whether it falls inside the product lines actually manufactured today, whether its
           target COGS sits inside that line's observed range, and how large the net-new
           ingredient list is — so a non-applicable idea is flagged before founder review.
-        required_skill: assess_idea_feasibility
         after: check_ingredient_availability
         fetch:
           entity_type: ProductLine
@@ -218,7 +215,6 @@ processes:
           (retailers, marketplaces, channels), and its reach with customers
           (popularity, ratings, review volume, leading brands) — to complement the
           internal pipeline and competitor signal.
-        required_skill: research-market-situation
         after: assess_feasibility
         # Invoke the web-research skill up front so its live payload lands in the facts
         # bag under `market_research_raw`; the instruction below reasons over it.
@@ -269,7 +265,7 @@ processes:
         decision_options: [APPROVE, REJECT, ESCALATE]
 
     metadata:
-      version: 9
+      version: 10
       effective_from: 2026-07-28
       requires_human_approval: true
       # Execute the agent steps that precede the human gate (retrieve_concept_context,
@@ -506,104 +502,3 @@ processes:
           config:
             type: simulated
             note: "Idea triage escalated for founder review — ambiguous match or mixed market signal."
-
-# Agent skills for the Innovation / NPD domain, defined inline rather than in a
-# separate skills/ file. A skill is an abstract capability a process step
-# binds to via `required_skill` (above); its competencies are the atomic
-# abilities the executor (human or agent) must have, merged globally by id
-# into meta.Competency nodes. Bound by steps: retrieve_concept_context,
-# check_ingredient_availability, assess_feasibility, research_market_situation.
-skills:
-  - id: find_similar_products
-    name: Find Similar Products & Prior Ideas
-    type: agent_skill
-    description: >
-      Given an idea (supplied as either an idea_id or raw text concept), queries
-      all existing ideas from DIM_IDEA and all active portfolio products from
-      V_PRODUCT_ENRICHED directly via dataset_search. Compares the idea's concept
-      against those datasets to detect pipeline duplicates, prior rejections
-      (STAGE = 'Rejected'), and live portfolio overlap — so triage can flag
-      "we already make this" or "this was already rejected" before the founder
-      decides. Also cross-references active competitor data (DIM_COMPETITOR /
-      DIM_COMPETITOR_PRODUCT) filtered to the idea's target category to
-      produce an explicit market-signal read for the triage brief.
-    domain: Innovation
-    owner: npd_team
-
-    competencies:
-      - id: dataset_similarity_search
-        proficiency_levels: [L1, L2, L3]
-      - id: portfolio_duplicate_detection
-        proficiency_levels: [L1, L2]
-      - id: rejected_match_confirmation
-        proficiency_levels: [L1, L2]
-      - id: market_signal_assessment
-        proficiency_levels: [L1, L2]
-
-  - id: research-market-situation
-    name: Research Market Situation (Web)
-    type: agent_skill
-    description: >
-      Given an idea (supplied as either an idea_id or raw text concept) and its
-      target category, runs a web search to capture the product's current
-      external market situation: typical retail price (with currency), where it
-      is being sold (retailers, marketplaces, channels), and its reach with
-      customers (popularity, ratings, review volume, leading brands). Produces a
-      concise 3-line market brief that complements the internal pipeline and
-      competitor signal from find_similar_products, so the founder can judge
-      external demand and pricing at triage. Web findings are directional and
-      each line should cite its source domain where possible.
-    domain: Innovation
-    owner: npd_team
-
-    competencies:
-      - id: web_market_research
-        proficiency_levels: [L1, L2, L3]
-      - id: price_discovery
-        proficiency_levels: [L1, L2]
-      - id: distribution_channel_scan
-        proficiency_levels: [L1, L2]
-      - id: customer_reach_assessment
-        proficiency_levels: [L1, L2]
-
-  - id: check_ingredient_availability
-    name: Check Ingredient Availability
-    type: agent_skill
-    description: >
-      Given an idea, decomposes it into the ingredients it would plausibly need
-      and matches each against the ingredient master (DIM_INGREDIENT) — every
-      row of which is already used in at least one live SKU. Reports which
-      derived ingredients are already sourced versus would require net-new
-      sourcing. Carries no stock/quantity data, so this reports sourcing
-      coverage only, never in-stock/out-of-stock status.
-    domain: Innovation
-    owner: npd_team
-
-    competencies:
-      - id: ingredient_decomposition
-        proficiency_levels: [L1, L2]
-      - id: ingredient_master_matching
-        proficiency_levels: [L1, L2, L3]
-      - id: sourcing_gap_assessment
-        proficiency_levels: [L1, L2]
-
-  - id: assess_idea_feasibility
-    name: Assess Idea Feasibility & Applicability
-    type: agent_skill
-    description: >
-      Given an idea and its target COGS, judges whether it falls inside the
-      product lines the company actually manufactures today (form factor,
-      category, observed COGS range) versus being a form factor never
-      produced. Combines this capability-envelope match with the ingredient
-      coverage from check_ingredient_availability to flag ideas that are not
-      realistically applicable to the current portfolio before founder review.
-    domain: Innovation
-    owner: npd_team
-
-    competencies:
-      - id: capability_envelope_matching
-        proficiency_levels: [L1, L2, L3]
-      - id: cost_envelope_assessment
-        proficiency_levels: [L1, L2]
-      - id: concept_applicability_screen
-        proficiency_levels: [L1, L2]
