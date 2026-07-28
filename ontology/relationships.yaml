@@ -104,27 +104,6 @@ relationships:
       - { name: volume_per_month, type: number }
       - { name: contract_type,    type: reference, references: ContractType }
 
-  # ---- Innovation pipeline ---------------------------------------------
-  - type: targets_category              # 14 (curated)
-    description: An NPD idea targets a category.
-    from: Idea
-    to:   Category
-    cardinality: many-to-one
-
-  - type: proposes_ingredient           # 15 (curated)
-    description: An idea proposes using an ingredient.
-    from: Idea
-    to:   Ingredient
-    cardinality: many-to-many
-
-  - type: evolves_to                    # 16 (curated)
-    description: An idea evolves into a launched product.
-    from: Idea
-    to:   Product
-    cardinality: many-to-one
-    edge_properties:
-      - { name: launched_on, type: string }
-
   # ---- Commercial & competition ----------------------------------------
   - type: listed_on                # 17
     description: A product is listed on a sales channel, with per-channel pricing.

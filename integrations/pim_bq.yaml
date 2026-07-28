@@ -1,5 +1,5 @@
 # PIM integration — erp-set-up.ctx_upside_master_data (static product truth).
-# Maps 8 entity types and 8 relationships to BigQuery tables/views.
+# Maps 7 entity types and 8 relationships to BigQuery tables/views.
 # Helper views (V_PRODUCT_ENRICHED, V_PRODUCT_CLAIM, V_NUTRIENT_DIM) must
 # exist first — see sql/views.sql.
 #

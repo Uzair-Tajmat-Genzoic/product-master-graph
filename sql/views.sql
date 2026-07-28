@@ -53,6 +53,61 @@ CREATE OR REPLACE VIEW `gen-lang-client-0520145261.ctx_upside_master_data.V_NUTR
 SELECT DISTINCT NUTRIENT_NAME
 FROM `gen-lang-client-0520145261.ctx_upside_master_data.PRODUCT_NUTRIENT`;
 
+-- Manufacturing capability envelope: one row per product line actually made
+-- today, with category, active SKU count, observed COGS range and shelf life.
+-- Feeds idea_capture_triage's feasibility step — a form factor absent from this
+-- view is one the company has NEVER produced.
+CREATE OR REPLACE VIEW `gen-lang-client-0520145261.ctx_upside_master_data.V_PRODUCT_LINE_CAPABILITY` AS
+SELECT
+  l.PRODUCT_LINE_ID,
+  l.PRODUCT_LINE_NAME,
+  c.CATEGORY_NAME,
+  COUNT(*)                      AS ACTIVE_SKUS,
+  ROUND(MIN(v.TOTAL_COGS_INR))  AS MIN_COGS_INR,
+  ROUND(MAX(v.TOTAL_COGS_INR))  AS MAX_COGS_INR,
+  ROUND(AVG(v.SHELF_LIFE_DAYS)) AS AVG_SHELF_LIFE_DAYS
+FROM `gen-lang-client-0520145261.ctx_upside_master_data.DIM_PRODUCT` d
+JOIN `gen-lang-client-0520145261.ctx_upside_master_data.V_PRODUCT_ENRICHED` v ON v.SKU = d.SKU
+JOIN `gen-lang-client-0520145261.ctx_upside_master_data.DIM_PRODUCT_LINE`   l ON l.PRODUCT_LINE_ID = d.PRODUCT_LINE_ID
+JOIN `gen-lang-client-0520145261.ctx_upside_master_data.DIM_CATEGORY`       c ON c.CATEGORY_ID = d.CATEGORY_ID
+WHERE v.IS_ACTIVE
+GROUP BY 1, 2, 3;
+
+-- Triage similarity candidates: every pipeline idea plus every active competitor
+-- product, unioned into ONE rowset so idea_capture_triage's first step can pull
+-- them through a single step-level `fetch:` and see them UN-TRUNCATED. Reading
+-- them as two separate context_package keys previews each list down to 4 rows
+-- (_compact_facts), which silently hid 12 of 16 competitor products.
+CREATE OR REPLACE VIEW `gen-lang-client-0520145261.ctx_upside_master_data.V_TRIAGE_SIMILARITY_CANDIDATES` AS
+SELECT
+  'IDEA'                                AS SOURCE,
+  i.IDEA_ID                             AS CANDIDATE_ID,
+  i.NAME                                AS NAME,
+  i.STAGE                               AS STAGE,
+  i.HYPOTHESIS                          AS HYPOTHESIS,
+  i.THESIS_FIT                          AS THESIS_FIT,
+  CAST(i.TARGET_COGS_INR AS STRING)     AS TARGET_COGS_INR,
+  CAST(NULL AS STRING)                  AS CITY,
+  CAST(NULL AS STRING)                  AS COMPETITOR_ID,
+  CAST(NULL AS STRING)                  AS CATEGORY
+FROM `gen-lang-client-0520145261.ctx_upside_master_data.DIM_IDEA` i
+UNION ALL
+SELECT
+  'COMPETITOR_PRODUCT'                  AS SOURCE,
+  cp.COMPETITOR_PRODUCT_ID              AS CANDIDATE_ID,
+  cp.PRODUCT_NAME                       AS NAME,
+  CAST(NULL AS STRING)                  AS STAGE,
+  CAST(NULL AS STRING)                  AS HYPOTHESIS,
+  CAST(NULL AS STRING)                  AS THESIS_FIT,
+  CAST(NULL AS STRING)                  AS TARGET_COGS_INR,
+  cp.CITY                               AS CITY,
+  cp.COMPETITOR_ID                      AS COMPETITOR_ID,
+  cm.CATEGORY                           AS CATEGORY
+FROM `gen-lang-client-0520145261.ctx_upside_master_data.DIM_COMPETITOR_PRODUCT` cp
+LEFT JOIN `gen-lang-client-0520145261.ctx_upside_master_data.DIM_COMPETITOR` cm
+  ON cm.COMPETITOR_ID = cp.COMPETITOR_ID AND cm.IS_ACTIVE
+WHERE cp.IS_ACTIVE;
+
 -- =====================================================================
 -- LIVE (gen-lang-client-0520145261.bronze / silver / gold)
 -- =====================================================================

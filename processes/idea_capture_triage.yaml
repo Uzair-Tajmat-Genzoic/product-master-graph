@@ -1,0 +1,609 @@
+version: 1
+
+processes:
+  - id: idea_capture_triage
+    name: Idea Capture & Triage
+    description: |
+      Receives an idea as either a raw text description or an existing idea_id
+      from DIM_IDEA. Fetches all ideas and active portfolio products directly
+      from BigQuery via dataset_search. Checks for duplicates, prior rejections,
+      and market signal from competitor data. Checks whether the idea's ingredients
+      are already sourced or would need net-new sourcing, and whether the idea falls
+      inside the product lines and cost envelope the company actually manufactures
+      today. Then runs a web search to capture the idea's external market situation —
+      typical retail price, where it is being sold, and its reach with customers.
+      Presents all briefs to the founder to approve, reject, or escalate.
+    domain: Innovation
+    owner: npd_team
+
+    triggers:
+      - { type: manual, allowed_roles: [npd_team, Admin] }
+      - { type: event, event_type: idea_capture_triage }
+
+    inputs:
+      - { name: idea_input, type: string, required: true,
+          description: "Either an idea_id (e.g. IDE-002) to look up an existing row in DIM_IDEA, or raw text describing a new idea (name, hypothesis, target category)." }
+
+    outputs:
+      - { name: triage_brief, type: string }
+      - { name: ingredient_brief, type: string }
+      - { name: feasibility_brief, type: string }
+      - { name: market_situation_brief, type: string }
+      - { name: decision, type: string }
+
+    steps:
+      - id: retrieve_concept_context
+        name: Find Similar Products & Pipeline Overlap
+        type: agent
+        description: >
+          Automatically queries BigQuery datasets to evaluate incoming idea concepts against
+          existing pipeline ideas, prior rejections, and competitor market signals.
+        required_skill: find_similar_products
+        # Un-truncated candidate read. WITHOUT this the step has no fetch/skill, so
+        # _step_input_keys returns [] and every context_package list reaches the LLM
+        # through _compact_facts, which previews any list >4 rows down to 4 — hiding
+        # 12 of 16 active competitor products. A step's own fetch `as` key lands in
+        # STEP INPUT DATA un-previewed (9k budget; this payload measures 5.3k).
+        # `limit` is explicit because _run_step_fetch defaults it to 10.
+        fetch:
+          entity_type: Product
+          source_table: V_TRIAGE_SIMILARITY_CANDIDATES
+          columns: [SOURCE, CANDIDATE_ID, NAME, STAGE, HYPOTHESIS, THESIS_FIT, TARGET_COGS_INR, CITY, COMPETITOR_ID, CATEGORY]
+          order_by: CANDIDATE_ID
+          order_dir: asc
+          # 400, not 5000: this lands un-previewed in STEP INPUT DATA (see comment
+          # above), but that block is truncated at 9000 chars regardless, so rows
+          # beyond a few hundred were already being silently discarded — just after
+          # a full 5000-row BigQuery fetch and Postgres snapshot instead of before it.
+          limit: 400
+          as: similarity_candidates
+        produces: [triage_brief, matched_idea_id, idea_name, hypothesis, thesis_fit, target_cogs_inr, similar_ideas, similar_competitor_products, competitive_reason]
+        instruction: >
+          `similarity_candidates` is the COMPLETE, un-truncated candidate set: rows with
+          SOURCE='IDEA' are pipeline ideas from DIM_IDEA (with STAGE / HYPOTHESIS /
+          THESIS_FIT / TARGET_COGS_INR), rows with SOURCE='COMPETITOR_PRODUCT' are active
+          competitor products (with CITY / COMPETITOR_ID / CATEGORY). Use it — not the
+          previewed `all_ideas` / `active_competitor_products` facts — for every match.
+          `idea_input` is either an IDEA_ID (find that CANDIDATE_ID among the SOURCE='IDEA'
+          rows) or raw concept text (use it directly). Return `triage_brief` as a set of
+          titled cards. Each card is a short markdown heading (`### Title`) followed by 1–3
+          concise, factual lines drawn directly from the data — no padding, no speculation.
+          Write "None found" for any card with no matching rows. Produce exactly these three
+          cards, in order:
+          `### Pipeline & Portfolio Overlap` — the closest matching SOURCE='IDEA' row and/or
+          live product in `portfolio_products`, named with its IDEA_ID/SKU and how close the
+          overlap is (or "None found").
+          `### Prior Rejections` — any SOURCE='IDEA' row with STAGE='Rejected' matching by
+          name/concept, named with its idea name and ID (or "None found").
+          `### Competitor Signal` — the count of SOURCE='COMPETITOR_PRODUCT' rows whose
+          CATEGORY matches the idea's target category, with a couple of example product
+          names if useful (or "None found").
+          ALSO extract the idea's identity so it can be written back on approval:
+          - `matched_idea_id`: if `idea_input` IS a CANDIDATE_ID present among the
+            SOURCE='IDEA' rows, that id; otherwise null (a brand-new idea — a fresh id is
+            minted downstream).
+          - `idea_name`: the product/idea name (from the matched row's NAME, or parsed from
+            the raw concept text — e.g. "Chocolate Fudge Cake 450g").
+          For a matched existing idea, carry forward its already-stored values from the matched
+          SOURCE='IDEA' row so a name-only re-triage never overwrites them; only for a
+          genuinely new idea fall back to what the input states, else null:
+          - `hypothesis`: for a matched existing idea, its stored HYPOTHESIS; for a new idea,
+            the stated consumer hypothesis if given, else null.
+          - `thesis_fit`: for a matched existing idea, its stored THESIS_FIT; for a new idea,
+            how it fits the healthy-snacking thesis if stated, else null.
+          - `target_cogs_inr`: for a matched existing idea, its stored TARGET_COGS_INR as a
+            number; for a new idea, the stated target COGS in INR as a number if given, else null.
+          ALSO produce `similar_ideas`: a list of objects for ONLY the SOURCE='IDEA' rows that
+          are the same or a similar concept to this idea (same form factor, flavour family, or
+          target need) — always include an exact CANDIDATE_ID match and any STAGE='Rejected'
+          near-duplicate, since those drive the decision. Each object must use EXACTLY these
+          keys, copied verbatim from the candidate row: {"IDEA_ID": <CANDIDATE_ID>, "NAME":
+          <NAME>, "STAGE": <STAGE>, "HYPOTHESIS": <HYPOTHESIS>, "THESIS_FIT": <THESIS_FIT>,
+          "TARGET_COGS_INR": <TARGET_COGS_INR>}. Include only genuinely similar rows — never
+          the whole table. If NOTHING is similar, return exactly one row:
+          [{"NAME": "No similar ideas found"}].
+          ALSO produce `similar_competitor_products`: the same treatment for
+          SOURCE='COMPETITOR_PRODUCT' rows — only products that are the same or a similar
+          concept (prefer rows whose CATEGORY matches the idea's target category, but include
+          a clear name-level match in any category). Each object must use EXACTLY these keys:
+          {"COMPETITOR_PRODUCT_ID": <CANDIDATE_ID>, "PRODUCT_NAME": <NAME>, "CITY": <CITY>,
+          "COMPETITOR_ID": <COMPETITOR_ID>}. If NOTHING is similar, return exactly one row:
+          [{"PRODUCT_NAME": "No similar competitor products found"}].
+          ALSO produce `competitive_reason`: ONE factual sentence (no heading, ≤25 words)
+          summarizing pipeline/portfolio overlap and competitive signal — lead with the strongest
+          of: an exact prior-rejected duplicate, a live portfolio overlap, or the count of
+          competitor products in this idea's category. If nothing similar exists, say so plainly
+          (e.g. "No matching pipeline idea, rejection, or active competitor product found in this
+          category.").
+          Set any field you cannot determine to null — never invent values.
+      - id: check_ingredient_availability
+        name: Check Ingredient Availability
+        type: agent
+        description: >
+          Decomposes the idea into the ingredients it would plausibly need and matches each
+          against the ingredient master. Every ingredient in that master is already used in a
+          live SKU, so a match means "we already buy this" and a miss means net-new sourcing.
+        required_skill: check_ingredient_availability
+        after: retrieve_concept_context
+        # Step-level fetch (not context_package): _compact_facts previews long row
+        # lists at 4 rows, so the 153-row master would arrive unusable. A step's own
+        # fetch `as` key goes into STEP INPUT DATA un-previewed. Name-only keeps it
+        # at ~7.5k of the 9k budget; adding INGREDIENT_ID overflows to ~11.8k.
+        # `limit` is explicit because _run_step_fetch defaults it to 10.
+        fetch:
+          entity_type: Ingredient
+          source_table: DIM_INGREDIENT
+          columns: [INGREDIENT_NAME]
+          order_by: INGREDIENT_NAME
+          order_dir: asc
+          limit: 500
+          as: ingredient_master
+        produces: [ingredient_brief, ingredient_coverage, missing_ingredients, ingredient_reason]
+        instruction: >
+          `ingredient_master` is the complete list of ingredient names this company already
+          sources; every one is already used in at least one live SKU, so presence means
+          "we already buy this" and absence means net-new sourcing is required. It carries
+          NO stock quantities — never state or imply that an ingredient is in or out of stock.
+          First, from `idea_name` (and `hypothesis` if present), derive the 5–12 ingredients
+          the product would plausibly need — be concrete ("whey protein isolate", "dates",
+          "cocoa powder"), not categories. Then match each against `ingredient_master` by
+          meaning rather than exact string ("Almonds" matches "almond"; "Fresh cream" matches
+          "cream"), only claiming a match when a specific master row supports it.
+          Return `ingredient_brief` as titled cards: each card a short markdown heading
+          (`### Title`) followed by 1–2 concise, factual lines. Write "None found" for an
+          empty card. Produce exactly these two cards, in order:
+          `### Already Sourced` — the derived ingredients matched in the master, each named
+          alongside the master name it matched.
+          `### Needs New Sourcing` — the derived ingredients with no match, i.e. the net-new
+          supply chain this idea would require.
+          ALSO produce `ingredient_coverage`: an object
+          {"derived": <int>, "matched": <int>, "coverage_pct": <int 0-100>}.
+          ALSO produce `missing_ingredients`: a flat list of the unmatched ingredient names
+          (an empty list if none).
+          ALSO produce `ingredient_reason`: ONE factual sentence (no heading, ≤20 words) of
+          the form "N of M ingredients already sourced; needs X and Y".
+          Set any field you cannot determine to null — never invent values.
+      - id: assess_feasibility
+        name: Assess Feasibility & Applicability
+        type: agent
+        description: >
+          Judges whether the idea is something this company could plausibly make at all —
+          whether it falls inside the product lines actually manufactured today, whether its
+          target COGS sits inside that line's observed range, and how large the net-new
+          ingredient list is — so a non-applicable idea is flagged before founder review.
+        required_skill: assess_idea_feasibility
+        after: check_ingredient_availability
+        fetch:
+          entity_type: ProductLine
+          source_table: V_PRODUCT_LINE_CAPABILITY
+          columns: [PRODUCT_LINE_NAME, CATEGORY_NAME, ACTIVE_SKUS, MIN_COGS_INR, MAX_COGS_INR, AVG_SHELF_LIFE_DAYS]
+          order_by: CATEGORY_NAME
+          order_dir: asc
+          limit: 100
+          as: production_capability
+        produces: [feasibility_brief, feasibility_verdict, feasibility_reason]
+        instruction: >
+          `production_capability` is the complete set of product lines this company currently
+          manufactures — one row per active line with its category, active SKU count, observed
+          COGS range in INR, and average shelf life. A form factor absent from this list is one
+          the company has NEVER made; treat it as such, not as unknown.
+          Judge the idea (`idea_name`, `hypothesis`, `thesis_fit`, `target_cogs_inr`) against it,
+          together with `ingredient_coverage` and `missing_ingredients` from the previous step.
+          Return `feasibility_brief` as titled cards in the same format as `triage_brief`
+          (`### Title` heading + 1–2 concise factual lines; "None found" when empty). Produce
+          exactly these three cards, in order:
+          `### Capability Fit` — the closest line(s) in `production_capability` by form factor
+          and category, named explicitly with their active SKU count; or state plainly that no
+          existing line covers this form factor.
+          `### Cost Envelope` — `target_cogs_inr` against MIN_COGS_INR / MAX_COGS_INR of the
+          closest line ("None found" if either is unknown).
+          `### Applicability Risk` — why this idea may not be worth pursuing: no capability
+          match, a large net-new ingredient list, no thesis fit, or an incoherent concept.
+          Write "None found" if there is no material risk.
+          ALSO produce `feasibility_verdict`: exactly one of FEASIBLE, STRETCH, NOT_APPLICABLE.
+          FEASIBLE when an existing line covers the form factor and ingredient coverage is
+          largely met. STRETCH when it is adjacent to a line we run, or needs a meaningful but
+          bounded new ingredient list. NOT_APPLICABLE when no line we run is close (e.g. a
+          beverage when no beverage line exists) or the concept is incoherent for a
+          better-for-you snacks portfolio.
+          ALSO produce `feasibility_reason`: ONE factual sentence (no heading, ≤25 words)
+          leading with the verdict and its single strongest justification.
+          Set any field you cannot determine to null — never invent values.
+      - id: research_market_situation
+        name: Research Market Trends & Competitors
+        type: agent
+        description: >
+          Runs a web search on the idea's product / category to capture the current
+          external market situation — typical retail price, where it is being sold
+          (retailers, marketplaces, channels), and its reach with customers
+          (popularity, ratings, review volume, leading brands) — to complement the
+          internal pipeline and competitor signal.
+        required_skill: research-market-situation
+        after: assess_feasibility
+        # Invoke the web-research skill up front so its live payload lands in the facts
+        # bag under `market_research_raw`; the instruction below reasons over it.
+        skill:
+          name: research-market-situation
+          operation: run
+          args:
+            idea_input: "{{idea_name}}"
+            target_category: ""
+          as: market_research_raw
+        produces: [market_situation_brief, combined_triage_brief, market_reason]
+        instruction: >
+          The web-research skill has already run for this idea; its raw payload is in
+          `market_research_raw` (price/where-sold/customer-reach lines from a live web
+          search). Reason over `market_research_raw` — do not invent data beyond it.
+          Return `market_situation_brief` as a set of titled cards, matching the
+          format of `triage_brief`: each card is a short markdown heading
+          (`### Title`) followed by 1–3 concise, factual lines, citing the source
+          domain in-line where possible. Write "None found" for any card the web
+          search yields nothing usable for. Produce exactly these three cards, in
+          order:
+          `### Retail Price` — typical retail price range (with currency) and an
+          example seller/listing (or "None found").
+          `### Where Sold` — retailers, marketplaces, or channels currently carrying
+          this or comparable products (or "None found").
+          `### Customer Reach` — traction signals: review counts, ratings, popularity,
+          or leading brands in the category (or "None found").
+          ALSO produce `combined_triage_brief` by concatenating every card from
+          `triage_brief`, then every card from `ingredient_brief`, then every card
+          from `feasibility_brief`, then every card from `market_situation_brief`, in
+          that order and preserving each card's heading, so the founder sees internal
+          pipeline data, ingredient sourcing, feasibility, and external web research as
+          one unified set of cards.
+          ALSO produce `market_reason`: ONE short, factual sentence (no heading, ≤25
+          words) summarizing the external market picture — the headline price point,
+          main channel, and traction signal — for the Market Signal decision card. If the web
+          data is empty, set `market_reason` to "No external market signal found".
+      - id: hitl_approval
+        name: Executive Review & Decision
+        type: human
+        description: >
+          Review the triage brief (pipeline ideas, prior rejections, active market signal)
+          together with the market-situation brief (external price, where sold, and customer
+          reach from web research). Choose APPROVE to advance the idea stage to 'Triage',
+          REJECT if a live product or prior rejection covers it, or ESCALATE for deeper evaluation.
+        after: research_market_situation
+        rationale_from: combined_triage_brief
+        decision_options: [APPROVE, REJECT, ESCALATE]
+
+    metadata:
+      version: 9
+      effective_from: 2026-07-28
+      requires_human_approval: true
+      # Execute the agent steps that precede the human gate (retrieve_concept_context,
+      # check_ingredient_availability, assess_feasibility, research_market_situation)
+      # BEFORE pausing, so their produced facts — triage_brief, ingredient_brief,
+      # feasibility_brief, market_situation_brief, combined_triage_brief —
+      # are materialized and bind to the brief cards / rationale. Scoped to this
+      # process; other processes are unaffected.
+      run_steps_before_gate: true
+      # This is a stepped process (its HITL step is the terminal gate). Opt in to
+      # firing the decision-keyed `actions` below (upsert_idea_row / reject_idea_row)
+      # when the founder approves/rejects — stepped processes otherwise complete
+      # without running metadata.actions.
+      run_actions_on_decision: true
+      # Fixed 4-card "Why AI recommends this" layout (replaces the old single
+      # pinned_reason + free-form 2-4 LLM cards, which produced an inconsistent
+      # count/category from run to run). 3 of 4 cards are deterministic, built
+      # straight from each step's own one-line `_reason` fact — same wording every
+      # run, never missing. Only `general` (no `from`) is written by the model at
+      # decision time, carrying the brand/health-fit judgment from hitl_approval's
+      # instruction above and anything else mechanization can't cover. Read
+      # directly off `process.raw["metadata"]["reason_slots"]` by _apply_reason_slots
+      # (event_agent.py) — opt-in; a process that declares nothing here (every
+      # other process) is unaffected.
+      reason_slots:
+        - key: general
+          title: Overall Fit
+        - key: market
+          title: Market Signal
+          from: market_reason
+          tone: good
+        - key: feasibility
+          title: Feasibility & Ingredients
+          from: [feasibility_reason, ingredient_reason]
+          tone: good
+        - key: competitive
+          title: Competitor & Existing Ideas
+          from: competitive_reason
+          tone: good
+
+      context_package:
+        - key: idea_input
+          source: event
+          required: true
+
+        # These four keys are all list facts, so _compact_facts previews any of them
+        # down to 4 rows before the model sees it (event_agent.py:_compact_facts).
+        # Limits below are sized to what a human reviewer plus the LLM's own
+        # `similarity_candidates` reasoning actually use, not the full table —
+        # cutting each from 5000/2000 stops most of the fetched rows from being
+        # thrown away after a full BigQuery read + Postgres snapshot.
+        - key: all_ideas
+          source: dataset_search
+          required: true
+          query:
+            entity_type: Product
+            dataset: DIM_IDEA
+            columns: [IDEA_ID, NAME, STAGE, HYPOTHESIS, THESIS_FIT, TARGET_COGS_INR]
+            order_by: IDEA_ID
+            order_dir: asc
+            limit: 300
+
+        - key: portfolio_products
+          source: dataset_search
+          required: false
+          query:
+            entity_type: Product
+            dataset: V_PRODUCT_ENRICHED
+            # CATEGORY does not exist on V_PRODUCT_ENRICHED (see sql/views.sql) —
+            # selecting it made this key error in BigQuery and resolve empty on
+            # every single run.
+            columns: [SKU, DISPLAY_NAME, DESCRIPTION, STATUS, IS_ACTIVE]
+            order_by: SKU
+            order_dir: asc
+            limit: 200
+          post:
+            where:
+              - { field: IS_ACTIVE, op: eq, value: true }
+
+        - key: active_competitors
+          source: dataset_search
+          required: false
+          query:
+            entity_type: Competitor
+            dataset: DIM_COMPETITOR
+            columns: [COMPETITOR_ID, COMPETITOR_NAME, CATEGORY, IS_ACTIVE]
+            order_by: CATEGORY
+            order_dir: asc
+            limit: 200
+          post:
+            where:
+              - { field: IS_ACTIVE, op: eq, value: true }
+            sort_by: CATEGORY
+
+        - key: active_competitor_products
+          source: dataset_search
+          required: false
+          query:
+            entity_type: CompetitorProduct
+            dataset: DIM_COMPETITOR_PRODUCT
+            columns: [COMPETITOR_PRODUCT_ID, PRODUCT_NAME, CITY, IS_ACTIVE, COMPETITOR_ID]
+            order_by: COMPETITOR_ID
+            order_dir: asc
+            limit: 200
+          post:
+            where:
+              - { field: IS_ACTIVE, op: eq, value: true }
+            sort_by: COMPETITOR_ID
+
+      key_data:
+        - title: Similar Pipeline Ideas
+          summary: Pipeline ideas and prior rejections similar to this idea (from DIM_IDEA).
+          views:
+            - view: table
+              from: similar_ideas
+              columns: [IDEA_ID, NAME, STAGE, HYPOTHESIS, THESIS_FIT, TARGET_COGS_INR]
+
+        - title: Ingredient Availability
+          summary: Which of the idea's ingredients we already source, and what would be net-new.
+          views:
+            - { view: markdown, from: ingredient_brief }
+
+        - title: Feasibility
+          summary: Whether the idea falls inside the product lines and cost envelope we actually manufacture.
+          views:
+            - { view: markdown, from: feasibility_brief }
+            - view: table
+              from: production_capability
+              columns: [CATEGORY_NAME, PRODUCT_LINE_NAME, ACTIVE_SKUS, MIN_COGS_INR, MAX_COGS_INR]
+
+        - title: Market Research
+          summary: Web-research brief from the research-market-situation skill.
+          views:
+            - { view: markdown, from: market_situation_brief }
+
+        - title: Similar Competitor Products
+          summary: Active competitor products similar to this idea (from DIM_COMPETITOR_PRODUCT).
+          views:
+            - view: table
+              from: similar_competitor_products
+              columns: [COMPETITOR_PRODUCT_ID, PRODUCT_NAME, CITY, COMPETITOR_ID]
+
+
+
+      # NOTE: policy_rules is documentation only — the EventAgent reads `description`/
+      # `instruction` (the TASK), not this block; the key guidance is folded into
+      # hitl_approval's `instruction` above (brand/health fit and ingredient-sourcing
+      # weight were previously ONLY in this dead block and never reached the model).
+      policy_rules:
+            - "Treat `idea_input` as either a CANDIDATE_ID or raw concept text. Match it against the SOURCE='IDEA' rows of `similarity_candidates`, which is the complete un-truncated set — never against the previewed `all_ideas` fact."
+            - "Only consider an idea previously rejected if a matching row has `STAGE = 'Rejected'`. Never infer rejection from similarity alone."
+            - "`similarity_candidates` already contains only active competitor products. Before evaluating competition, filter the SOURCE='COMPETITOR_PRODUCT' rows to those whose `CATEGORY` matches the idea's target category."
+            - "`similar_ideas` and `similar_competitor_products` must contain ONLY genuinely similar rows, never the full table. When nothing is similar, each must be the single authored 'No similar …found' row."
+            - "`ingredient_master` records only which ingredients are already sourced, with no stock quantities — never state that an ingredient is in or out of stock, only that it is already sourced or would be net-new."
+            - "`production_capability` is the definitive list of product lines manufactured today; an absent form factor means never made, not unknown."
+            - "Recommend:
+              • APPROVE if there is no confirmed rejected match and the idea has either market evidence (relevant active competitor products) or a clearly differentiated thesis.
+              • REJECT if it is a near-duplicate of a confirmed rejected idea or is already fully covered by a live portfolio product.
+              • ESCALATE if the match is uncertain, market evidence is mixed, or additional founder context is needed."
+            - "Weigh `feasibility_verdict`: NOT_APPLICABLE pushes toward REJECT unless market evidence is unusually strong; STRETCH pushes toward ESCALATE; FEASIBLE leaves the duplicate/prior-rejection rules above in charge."
+            - "`market_situation_brief` comes from external web search and provides directional context only. Use it to assess demand, pricing, and channels, but never APPROVE or REJECT based solely on web data. Corroborate with internal competitor signals when possible."
+      actions:
+        - name: upsert_idea_row
+          decision: APPROVE
+          connector: context_graph
+          config:
+            type: dataset_upsert
+            entity_type: Product
+            source_table: DIM_IDEA
+            dataset: ctx_upside_master_data
+            key_column: IDEA_ID
+            key_prefix: IDEA_
+            generate_key_if_blank: true
+            row:
+              IDEA_ID: "{{facts.matched_idea_id}}"
+              NAME: "{{facts.idea_name}}"
+              STAGE: Triage
+              HYPOTHESIS: "{{facts.hypothesis}}"
+              THESIS_FIT: "{{facts.thesis_fit}}"
+              TARGET_COGS_INR: "{{facts.target_cogs_inr}}"
+
+        - name: advance_idea_to_triage
+          decision: APPROVE
+          connector: notify
+          config:
+            type: notify
+            recipient: npd_team
+            message: "Idea approved at triage — stage advances to Triage in DIM_IDEA."
+
+        - name: log_idea_approval_status
+          decision: APPROVE
+          connector: simulated
+          config:
+            type: simulated
+            note: "Approval logged. Updated STAGE = 'Triage' in DIM_IDEA for the triaged idea."
+
+        - name: reject_idea_row
+          decision: REJECT
+          connector: context_graph
+          config:
+            type: dataset_upsert
+            entity_type: Product
+            source_table: DIM_IDEA
+            dataset: ctx_upside_master_data
+            key_column: IDEA_ID
+            key_prefix: IDEA_
+            generate_key_if_blank: true
+            row:
+              IDEA_ID: "{{facts.matched_idea_id}}"
+              NAME: "{{facts.idea_name}}"
+              STAGE: Rejected
+              HYPOTHESIS: "{{facts.hypothesis}}"
+              THESIS_FIT: "{{facts.thesis_fit}}"
+              TARGET_COGS_INR: "{{facts.target_cogs_inr}}"
+
+        - name: reject_idea
+          decision: REJECT
+          connector: notify
+          config:
+            type: notify
+            recipient: npd_team
+            message: "Idea rejected at triage — stage set to Rejected. Future triage runs will flag it as a prior-rejected match."
+
+        - name: log_idea_rejection_status
+          decision: REJECT
+          connector: simulated
+          config:
+            type: simulated
+            note: "Rejection logged. Update STAGE = 'Rejected' in DIM_IDEA for the triaged idea."
+
+        - name: escalate_idea_review
+          decision: ESCALATE
+          connector: simulated
+          config:
+            type: simulated
+            note: "Idea triage escalated for founder review — ambiguous match or mixed market signal."
+
+# Agent skills for the Innovation / NPD domain, defined inline rather than in a
+# separate skills/ file. A skill is an abstract capability a process step
+# binds to via `required_skill` (above); its competencies are the atomic
+# abilities the executor (human or agent) must have, merged globally by id
+# into meta.Competency nodes. Bound by steps: retrieve_concept_context,
+# check_ingredient_availability, assess_feasibility, research_market_situation.
+skills:
+  - id: find_similar_products
+    name: Find Similar Products & Prior Ideas
+    type: agent_skill
+    description: >
+      Given an idea (supplied as either an idea_id or raw text concept), queries
+      all existing ideas from DIM_IDEA and all active portfolio products from
+      V_PRODUCT_ENRICHED directly via dataset_search. Compares the idea's concept
+      against those datasets to detect pipeline duplicates, prior rejections
+      (STAGE = 'Rejected'), and live portfolio overlap — so triage can flag
+      "we already make this" or "this was already rejected" before the founder
+      decides. Also cross-references active competitor data (DIM_COMPETITOR /
+      DIM_COMPETITOR_PRODUCT) filtered to the idea's target category to
+      produce an explicit market-signal read for the triage brief.
+    domain: Innovation
+    owner: npd_team
+
+    competencies:
+      - id: dataset_similarity_search
+        proficiency_levels: [L1, L2, L3]
+      - id: portfolio_duplicate_detection
+        proficiency_levels: [L1, L2]
+      - id: rejected_match_confirmation
+        proficiency_levels: [L1, L2]
+      - id: market_signal_assessment
+        proficiency_levels: [L1, L2]
+
+  - id: research-market-situation
+    name: Research Market Situation (Web)
+    type: agent_skill
+    description: >
+      Given an idea (supplied as either an idea_id or raw text concept) and its
+      target category, runs a web search to capture the product's current
+      external market situation: typical retail price (with currency), where it
+      is being sold (retailers, marketplaces, channels), and its reach with
+      customers (popularity, ratings, review volume, leading brands). Produces a
+      concise 3-line market brief that complements the internal pipeline and
+      competitor signal from find_similar_products, so the founder can judge
+      external demand and pricing at triage. Web findings are directional and
+      each line should cite its source domain where possible.
+    domain: Innovation
+    owner: npd_team
+
+    competencies:
+      - id: web_market_research
+        proficiency_levels: [L1, L2, L3]
+      - id: price_discovery
+        proficiency_levels: [L1, L2]
+      - id: distribution_channel_scan
+        proficiency_levels: [L1, L2]
+      - id: customer_reach_assessment
+        proficiency_levels: [L1, L2]
+
+  - id: check_ingredient_availability
+    name: Check Ingredient Availability
+    type: agent_skill
+    description: >
+      Given an idea, decomposes it into the ingredients it would plausibly need
+      and matches each against the ingredient master (DIM_INGREDIENT) — every
+      row of which is already used in at least one live SKU. Reports which
+      derived ingredients are already sourced versus would require net-new
+      sourcing. Carries no stock/quantity data, so this reports sourcing
+      coverage only, never in-stock/out-of-stock status.
+    domain: Innovation
+    owner: npd_team
+
+    competencies:
+      - id: ingredient_decomposition
+        proficiency_levels: [L1, L2]
+      - id: ingredient_master_matching
+        proficiency_levels: [L1, L2, L3]
+      - id: sourcing_gap_assessment
+        proficiency_levels: [L1, L2]
+
+  - id: assess_idea_feasibility
+    name: Assess Idea Feasibility & Applicability
+    type: agent_skill
+    description: >
+      Given an idea and its target COGS, judges whether it falls inside the
+      product lines the company actually manufactures today (form factor,
+      category, observed COGS range) versus being a form factor never
+      produced. Combines this capability-envelope match with the ingredient
+      coverage from check_ingredient_availability to flag ideas that are not
+      realistically applicable to the current portfolio before founder review.
+    domain: Innovation
+    owner: npd_team
+
+    competencies:
+      - id: capability_envelope_matching
+        proficiency_levels: [L1, L2, L3]
+      - id: cost_envelope_assessment
+        proficiency_levels: [L1, L2]
+      - id: concept_applicability_screen
+        proficiency_levels: [L1, L2]

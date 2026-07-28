@@ -157,6 +157,76 @@ datasets:
       - { entity_attribute: id, table_column: SEGMENT_ID }
     columns: [SEGMENT_ID, MASTER_STORE_ID, STORE_NAME, CHANNEL, BUDGET_MONTH, ALLOCATED_BUDGET_RS, EXPECTED_REVENUE_RS]
 
+  - entity_type: Product
+    name: All Ideas
+    description: Ideas table for innovation triage
+    source_table: DIM_IDEA
+    connection: pim_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: IDEA_ID }
+    columns: [IDEA_ID, NAME, STAGE, HYPOTHESIS, THESIS_FIT, TARGET_COGS_INR]
+
+  - entity_type: Product
+    name: Portfolio products
+    description: Enriched product catalog
+    source_table: V_PRODUCT_ENRICHED
+    connection: pim_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: SKU }
+    columns: [SKU, DISPLAY_NAME, DESCRIPTION, STATUS, IS_ACTIVE, CATEGORY]
+
+  - entity_type: Competitor
+    name: Active competitors
+    description: Competitors table
+    source_table: DIM_COMPETITOR
+    connection: pim_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: COMPETITOR_ID }
+    columns: [COMPETITOR_ID, COMPETITOR_NAME, CATEGORY, IS_ACTIVE]
+
+  - entity_type: CompetitorProduct
+    name: Active competitor products
+    description: Competitor products table
+    source_table: DIM_COMPETITOR_PRODUCT
+    connection: pim_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: COMPETITOR_PRODUCT_ID }
+    columns: [COMPETITOR_PRODUCT_ID, PRODUCT_NAME, CITY, IS_ACTIVE, COMPETITOR_ID]
+
+  - entity_type: Ingredient
+    name: Ingredient master
+    description: Every ingredient the company sources (DIM_INGREDIENT). Each one is already used in at least one live SKU, so presence here means "we already buy this". Carries no stock quantities. Read by idea_capture_triage's ingredient-availability step.
+    source_table: DIM_INGREDIENT
+    connection: pim_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: INGREDIENT_ID }
+    columns: [INGREDIENT_ID, INGREDIENT_NAME, CATEGORY]
+
+  - entity_type: ProductLine
+    name: Production capability
+    description: Product lines actually manufactured today, with active SKU count, COGS range and shelf life. Read by idea_capture_triage's feasibility step.
+    source_table: V_PRODUCT_LINE_CAPABILITY
+    connection: pim_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: PRODUCT_LINE_ID }
+    columns: [PRODUCT_LINE_ID, PRODUCT_LINE_NAME, CATEGORY_NAME, ACTIVE_SKUS, MIN_COGS_INR, MAX_COGS_INR, AVG_SHELF_LIFE_DAYS]
+
+  - entity_type: Product
+    name: Triage similarity candidates
+    description: Pipeline ideas + active competitor products unioned into one candidate set, read cross-type via dataset_search by idea_capture_triage's first step so the similarity match sees every row un-truncated. Not entity-scoped — never rendered as a Product widget.
+    source_table: V_TRIAGE_SIMILARITY_CANDIDATES
+    connection: pim_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: CANDIDATE_ID }
+    columns: [SOURCE, CANDIDATE_ID, NAME, STAGE, HYPOTHESIS, THESIS_FIT, TARGET_COGS_INR, CITY, COMPETITOR_ID, CATEGORY]
+
 widgets:
   # --- Store page --------------------------------------------------------
   - entity_type: Store

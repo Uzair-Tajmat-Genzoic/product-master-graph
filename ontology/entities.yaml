@@ -170,15 +170,6 @@ entities:
       - { name: status,             type: reference, references: ClaimStatus }
       - { name: substantiation_ref, type: string }
 
-  - type: Idea
-    description: An NPD idea / brief in the innovation pipeline. Curated.
-    properties:
-      - { name: name,            type: string, required: true }
-      - { name: stage,           type: reference, references: IdeaStage }
-      - { name: hypothesis,      type: string }
-      - { name: target_cogs_inr, type: number }
-      - { name: thesis_fit,      type: string }
-
   # ---- Tier 5 : Customer -----------------------------------------------
   - type: Review
     description: A customer review / star rating (store-level).

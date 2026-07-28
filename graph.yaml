@@ -33,6 +33,13 @@ policies:
 processes:
   dir: ./processes
 
+#Agent/human skills a process step binds to via 'required_skill'. Skill
+# definitions live inline in the process files themselves (a top-level
+# `skills:` list alongside `processes:`) rather than in a separate dir, so
+# this points at the same processes/ directory the process loader reads.
+skills:
+  dir: ./processes
+
 # Lazy dataset links + widgets for fast-moving data (inventory, reviews,
 # complaints, forecasts, stock). Seeded on apply; data fetched on demand.
 technical_assets:
