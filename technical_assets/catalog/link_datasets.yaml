@@ -45,13 +45,13 @@ datasets:
 
   - entity_type: Store
     name: Current campaigns
-    description: Zomato ad campaigns running this month at this store (lazy). V_STORE_CAMPAIGN_CURRENT resolves RES_ID->store and re-scopes to "running now / this month" on each render.
+    description: Zomato/Swiggy ad campaigns running this month at this store (lazy). V_STORE_CAMPAIGN_CURRENT resolves RES_ID->store and re-scopes to "running now / this month" on each render.
     source_table: V_STORE_CAMPAIGN_CURRENT
     connection: live_bq
     cardinality: "1:m"
     join_keys:
       - { entity_attribute: id, table_column: MASTER_STORE_ID }
-    columns: [MASTER_STORE_ID, CAMPAIGN_ID, PRODUCT_TYPE, TARGETING, SEGMENTS, START_DATE, END_DATE, AD_SPEND_RS, AD_SALES_RS, AD_ORDERS, AD_IMPRESSIONS, AD_CLICKS]
+    columns: [MASTER_STORE_ID, CAMPAIGN_ID, RES_ID, PLATFORM, PRODUCT_TYPE, TARGETING, SEGMENTS, DATE, AD_SPEND_RS, AD_SALES_RS, AD_ORDERS, AD_IMPRESSIONS, AD_CLICKS, ROI, ADS_M2O_PCT, OVERALL_M2O_PCT, ROAS, CTR]
 
   - entity_type: Store
     name: Sales
@@ -62,6 +62,20 @@ datasets:
     join_keys:
       - { entity_attribute: id, table_column: STORE_ID }
     columns: [STORE_ID, SKU_ID, ITEM_SOURCE_NAME, QUANTITY, TOTAL, NET, ORDER_DATE, ORDER_STATE, ONLINE_ORDER_ID]
+
+  # Same V_SEGMENT_BUDGET table as the CustomerSegment link below, joined by
+  # STORE instead — lets a Store-anchored gather (e.g. campaign_planning_
+  # optimisation.yaml's segment_budget context key) resolve it directly,
+  # symmetric with "Current campaigns" above.
+  - entity_type: Store
+    name: Budget allocations
+    description: This store's marketing budget allocated per segment, by channel/month (lazy).
+    source_table: V_SEGMENT_BUDGET
+    connection: live_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: MASTER_STORE_ID }
+    columns: [SEGMENT_ID, MASTER_STORE_ID, STORE_NAME, CHANNEL, BUDGET_MONTH, ALLOCATED_BUDGET_RS, EXPECTED_REVENUE_RS]
 
   # --- attached to Product ----------------------------------------------
   # Static product truth (1:1 on SKU) from the PIM dataset, not bronze — hence
@@ -271,7 +285,7 @@ widgets:
     title: Running campaigns (this month)
     position: 4
     config:
-      columns: [CAMPAIGN_ID, PRODUCT_TYPE, SEGMENTS, END_DATE, AD_SPEND_RS, AD_SALES_RS, AD_ORDERS]
+      columns: [CAMPAIGN_ID, PRODUCT_TYPE, SEGMENTS, DATE, AD_SPEND_RS, AD_SALES_RS, AD_ORDERS, ROI]
       order_by: AD_SPEND_RS
       order_dir: desc
       limit: 50
