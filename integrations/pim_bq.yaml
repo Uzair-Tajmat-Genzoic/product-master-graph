@@ -9,7 +9,7 @@ name: pim_bq
 kind: bigquery
 
 connection:
-  project:     ${env.GCP_PROJECT}          # erp-set-up
+  project:     ${env.GCP_PROJECT}          
   dataset:     ctx_upside_master_data      # the "product_master" dataset never existed under this name — this is it
   credentials: ${env.GOOGLE_APPLICATION_CREDENTIALS_JSON}
 

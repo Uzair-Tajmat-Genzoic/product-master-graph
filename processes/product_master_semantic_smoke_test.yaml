@@ -1,0 +1,113 @@
+version: 1
+
+# ---------------------------------------------------------------------------
+# Product Master — Semantic Model Smoke Test (Conversational Analytics)
+#
+# The SIMPLEST possible process that proves the BigQuery "data context" semantic
+# model works end to end. The context package asks ONE natural-language question
+# of the linked Conversational Analytics model (product_master_ca) via
+# `source: semantic_model` (routed through ContextCollector.fetch_from_semantic_model
+# -> POST /verified-queries/run -> the CA API over the client's live BigQuery).
+# Google's Gemini generates + runs the SQL; a single review gate displays the rows.
+#
+# NOTE: a conversational_analytics model is QUESTION-driven — use `question`, not a
+# verified-query `name`. This graph runs under the EventAgent, where agent steps
+# before the first gate don't run, so the data is gathered in the context_package
+# (always assembled up front) and the FIRST step is the decision gate that shows it.
+# ---------------------------------------------------------------------------
+
+processes:
+  - id: product_master_semantic_smoke_test
+    name: Product Master — Semantic Model Smoke Test
+    description: |
+      Minimal end-to-end test of the BigQuery data-context semantic model.
+      `products_by_category` is answered by the linked Conversational Analytics
+      model (product_master_ca) from the question "How many active products are in
+      each category?" — Gemini generated + ran the SQL against BigQuery. One review
+      gate displays the rows; APPROVE if data came back.
+    domain: Merchandising
+    owner: data_team
+    definition_type: text
+
+    # Attach to Product. The bare binding sets the type; the filtered duplicate is
+    # what makes a manual / entity run discover the process (same pattern as the
+    # sibling processes in this folder).
+    applies_to:
+      - entity: Product
+      - entity: Product
+        where:
+          - { field: id, op: ne, value: __none__ }
+
+    triggers:
+      - { type: manual, allowed_roles: [DataAnalyst, MerchandisingManager] }
+      - { type: event, event_type: product_master_semantic_smoke_test }
+
+    inputs:
+      - { name: scheduled_at, type: datetime, required: false }
+
+    outputs:
+      - { name: decision, type: enum, values: [APPROVE, REJECT] }
+      - { name: check_summary, type: string }
+
+    steps:
+      # FIRST GATE — shows the semantic-model rows gathered in the context package.
+      - id: review
+        name: Review semantic-model output
+        type: decision
+        description: Confirm the BigQuery conversational-analytics agent returned rows.
+        instruction: >
+          `products_by_category` was answered by the linked Conversational Analytics
+          model (product_master_ca) from a natural-language question, run against
+          BigQuery. Write a SHORT summary: how many categories came back and the
+          largest category by product_count. Recommend APPROVE if rows are present
+          (the BigQuery data-context path works), REJECT if it is empty. Do NOT re-query.
+        decision_options: [APPROVE, REJECT]
+        produces: [check_summary]
+        key_data:
+          - title: "Active products by category (via Conversational Analytics)"
+            summary: "NL question answered by the CA model product_master_ca over BigQuery"
+            views:
+              - { view: table, from: products_by_category }
+
+    metadata:
+      version: 1
+      effective_from: 2026-07-29
+      priority: 5
+      requires_human_approval: true
+
+      tools:
+        skills: []
+
+      # The CA agent is queried here (up front) via source: semantic_model.
+      # `query` carries the model_id + a natural-language `question` to
+      # ContextCollector.fetch_from_semantic_model (CA is question-driven — there
+      # is no verified-query `name` to pin; Gemini generates + runs the SQL).
+      context_package:
+        - key: products_by_category
+          source: semantic_model
+          required: false
+          query:
+            model_id: product_master_ca
+            question: How many active products are in each category?
+            limit: 100
+        - { key: scheduled_at, source: event, required: false }
+
+      policy_rules:
+        - "`products_by_category` was answered by the Conversational Analytics model \"product_master_ca\" from a natural-language question, run against BigQuery. Do NOT re-query or re-list every row."
+        - "Recommend APPROVE when rows are present (the BigQuery data-context path works end to end); REJECT when empty."
+
+      actions:
+        - name: acknowledge_smoke_test
+          decision: APPROVE
+          connector: notify
+          config:
+            type: notify
+            recipient: data_team
+            message: "Product-master BigQuery semantic model verified — the conversational-analytics agent returned rows."
+
+        - name: dismiss_smoke_test
+          decision: REJECT
+          connector: simulated
+          config:
+            type: simulated
+            note: "Product-master semantic smoke test returned no rows — check the data agent (id / location / shared with the service account) and the pim_bq integration."
