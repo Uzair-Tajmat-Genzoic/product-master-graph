@@ -1,5 +1,5 @@
 # Business entity types for the product-master (better-for-you snacks) graph.
-# 20 node types across 5 tiers. Foreign keys are OMITTED from properties —
+# 22 node types across 5 tiers. Foreign keys are OMITTED from properties —
 # they appear as graph relationships instead (see relationships.yaml).
 #
 # Residency of the data behind each type:
@@ -130,6 +130,23 @@ entities:
       - { name: batch_hash,         type: string }
 
   # ---- Tier 4 : Compliance & Innovation (curated / hybrid) -------------
+  # The Innovation half of this tier. Backs DIM_IDEA, which idea_capture_triage
+  # reads via V_TRIAGE_SIMILARITY_CANDIDATES. Declared so the ideas that process
+  # judges similar surface under their own "IDEA" heading on the Full Context tab
+  # rather than being lumped in with real SKUs under Product. Note that IDEA_ID
+  # (e.g. IDE-002) is not projected as a node id today — the triage sweep labels
+  # its cards from the row data, so no Idea node has to exist for the tab to read
+  # correctly, but an id-based graph link will not resolve until ideas are
+  # projected.
+  - type: Idea
+    description: A pipeline product idea from DIM_IDEA, pre-SKU. Advances through IdeaStage on triage.
+    properties:
+      - { name: name,             type: string, required: true }   # NAME
+      - { name: stage,            type: reference, references: IdeaStage }
+      - { name: hypothesis,       type: string }
+      - { name: thesis_fit,       type: string }
+      - { name: target_cogs_inr,  type: number }
+
   - type: Regulation
     description: An FSSAI (or other) rule. Curated; drives the regulation-impact process.
     properties:
