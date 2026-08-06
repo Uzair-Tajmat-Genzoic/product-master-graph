@@ -57,6 +57,14 @@ processes:
           limit: 400
           as: similarity_candidates
         produces: [triage_brief, matched_idea_id, idea_name, hypothesis, thesis_fit, target_cogs_inr, similar_ideas, similar_competitor_products, competitive_reason]
+        # NOTE: the Full Context cards CANNOT be driven from `similar_ideas` /
+        # `similar_competitor_products`, tempting as it looks. Those are produced by this
+        # step, and the entity snapshot is written before any step runs
+        # (orchestrator.py: the sweep sits above `event_agent.run`), so at snapshot time
+        # they do not exist yet. `_entities_from_collected` also only ever reads
+        # `context_package` keys, never a step-produced fact. Narrowing the tab to the
+        # LLM-chosen subset needs a backend change; the cards below are therefore driven
+        # from the context_package reads instead.
         instruction: >
           `similarity_candidates` is the COMPLETE, un-truncated candidate set: rows with
           SOURCE='IDEA' are pipeline ideas from DIM_IDEA (with STAGE / HYPOTHESIS /
@@ -261,6 +269,36 @@ processes:
           reach from web research). Choose APPROVE to advance the idea stage to 'Triage',
           REJECT if a live product or prior rejection covers it, or ESCALATE for deeper evaluation.
         after: research_market_situation
+        # This is the model's TASK for the decision: event_agent.py resolves
+        # `step.instruction or step.description or step.name`, so an `instruction`
+        # here REPLACES the description above — it has to carry the review framing
+        # too, not just the rules. The rules below are the ones that decide the
+        # recommendation; they were previously only in `policy_rules`, which the
+        # EventAgent path never reads (no POLICY line in its system prompt), so
+        # they reached the model nowhere.
+        instruction: >
+          Review the combined brief — pipeline ideas and prior rejections, ingredient
+          sourcing, feasibility, and the external market situation from web research —
+          and recommend exactly one of APPROVE, REJECT, or ESCALATE.
+          APPROVE if no confirmed rejected match exists and the idea has either market
+          evidence (relevant active competitor products) or a clearly differentiated
+          thesis. REJECT if it is a near-duplicate of a confirmed rejected idea or is
+          already fully covered by a live portfolio product. ESCALATE if the match is
+          uncertain, market evidence is mixed, or more founder context is needed.
+          Treat an idea as previously rejected ONLY when a matching row has
+          STAGE = 'Rejected' — never infer rejection from similarity alone.
+          Weigh `feasibility_verdict`: NOT_APPLICABLE pushes toward REJECT unless
+          market evidence is unusually strong; STRETCH pushes toward ESCALATE;
+          FEASIBLE leaves the duplicate / prior-rejection rules above in charge.
+          Weigh ingredient sourcing: a large `missing_ingredients` list (low
+          `ingredient_coverage`) is real net-new supply-chain cost and pushes toward
+          ESCALATE — never toward APPROVE on its own.
+          Judge brand fit explicitly: this is a better-for-you snacks portfolio, so an
+          idea incoherent with a healthy-snacking thesis is not a fit however strong
+          its external market signal.
+          `market_situation_brief` is external web data and is directional context
+          ONLY — never APPROVE or REJECT on web data alone; corroborate with the
+          internal competitor and pipeline signals where possible.
         rationale_from: combined_triage_brief
         decision_options: [APPROVE, REJECT, ESCALATE]
 
@@ -280,43 +318,41 @@ processes:
       # when the founder approves/rejects — stepped processes otherwise complete
       # without running metadata.actions.
       run_actions_on_decision: true
-      # Fixed 4-card "Why AI recommends this" layout (replaces the old single
-      # pinned_reason + free-form 2-4 LLM cards, which produced an inconsistent
-      # count/category from run to run). 3 of 4 cards are deterministic, built
-      # straight from each step's own one-line `_reason` fact — same wording every
-      # run, never missing. Only `general` (no `from`) is written by the model at
-      # decision time, carrying the brand/health-fit judgment from hitl_approval's
-      # instruction above and anything else mechanization can't cover. Read
-      # directly off `process.raw["metadata"]["reason_slots"]` by _apply_reason_slots
-      # (event_agent.py) — opt-in; a process that declares nothing here (every
-      # other process) is unaffected.
-      reason_slots:
-        - key: general
-          title: Overall Fit
-        - key: market
-          title: Market Signal
-          from: market_reason
-          tone: good
-        - key: feasibility
-          title: Feasibility & Ingredients
-          from: [feasibility_reason, ingredient_reason]
-          tone: good
-        - key: competitive
-          title: Competitor & Existing Ideas
-          from: competitive_reason
-          tone: good
+      # NOTE on the "Why AI recommends this" cards: there is NO way to author them.
+      # Nothing in the backend assembles authored card slots — a `reason_slots:`
+      # block here (and the `_apply_reason_slots` reader it would need) has never
+      # existed, so don't add one expecting fixed titles. The card titles, bodies
+      # and count are all model-authored at decision time via event_agent.py's
+      # `"reasons": [{title, body, tone}]` JSON contract. The per-step one-line
+      # `*_reason` facts (competitive_reason / ingredient_reason /
+      # feasibility_reason / market_reason) are still worth producing: they reach
+      # the model as compact, pre-summarized facts next to the full briefs, which
+      # is what the cards end up paraphrasing.
 
       context_package:
         - key: idea_input
           source: event
           required: true
 
-        # These four keys are all list facts, so _compact_facts previews any of them
+        # These keys are all list facts, so _compact_facts previews any of them
         # down to 4 rows before the model sees it (event_agent.py:_compact_facts).
         # Limits below are sized to what a human reviewer plus the LLM's own
         # `similarity_candidates` reasoning actually use, not the full table —
         # cutting each from 5000/2000 stops most of the fetched rows from being
         # thrown away after a full BigQuery read + Postgres snapshot.
+        #
+        # Every `post.resolve` below also mints Full Context cards. This process
+        # resolves NO entity from the event — `idea_input` is free text, not an `*_id`,
+        # so entity_refs is empty and save_entity_snapshot writes `entities: []`, which
+        # makes the UI hide the whole tab (page.tsx TABS.filter). The sweep
+        # (_entities_from_collected) recovers one card per distinct (type, id) in the
+        # rows a key actually read, so the four keys here populate the four card groups:
+        # IDEA, PRODUCT, COMPETITOR, COMPETITORPRODUCT.
+        #
+        # Cost to know: `resolve` ALSO drives _resolve_row_names in the collector, which
+        # calls resolve_entity once per distinct id, SEQUENTIALLY. `post.where` runs
+        # first, so only surviving rows are charged — but a key with no `where` pays for
+        # every row it fetched. That is the ceiling to watch when raising a `limit`.
         - key: all_ideas
           source: dataset_search
           required: true
@@ -327,6 +363,15 @@ processes:
             order_by: IDEA_ID
             order_dir: asc
             limit: 300
+          post:
+            # No `where` here (every pipeline idea is worth showing, rejected ones very
+            # much included), so this pays one sequential resolve_entity call per idea
+            # fetched. `limit: 300` is the ceiling on that. IDEA_ID (e.g. IDE-002) is not
+            # a graph node id, so each lookup returns nothing and the card falls back to
+            # the row's own NAME — correct on screen, but the id-based graph link stays
+            # dead until ideas are projected as nodes.
+            resolve:
+              - { field: IDEA_ID, type: Idea, as: NAME }
 
         - key: portfolio_products
           source: dataset_search
@@ -344,6 +389,10 @@ processes:
           post:
             where:
               - { field: IS_ACTIVE, op: eq, value: true }
+            # `where` above runs BEFORE resolve, so only the ACTIVE SKUs are swept and
+            # charged a lookup — not all 200 fetched.
+            resolve:
+              - { field: SKU, type: Product, as: DISPLAY_NAME }
 
         - key: active_competitors
           source: dataset_search
@@ -359,6 +408,17 @@ processes:
             where:
               - { field: IS_ACTIVE, op: eq, value: true }
             sort_by: CATEGORY
+            # `where` runs BEFORE resolve, so only the active brands are swept and
+            # charged a lookup, not all 200 fetched.
+            #
+            # `as` deliberately names a column the query ALREADY selects:
+            # _resolve_row_names writes the graph-resolved name into `as` first, then
+            # the row's own key/value pass restores the BigQuery value — so the card is
+            # labelled correctly whether or not a Competitor node exists in the graph,
+            # and the fact rows the LLM reads are unchanged (no new column, no altered
+            # value).
+            resolve:
+              - { field: COMPETITOR_ID, type: Competitor, as: COMPETITOR_NAME }
 
         - key: active_competitor_products
           source: dataset_search
@@ -374,6 +434,17 @@ processes:
             where:
               - { field: IS_ACTIVE, op: eq, value: true }
             sort_by: COMPETITOR_ID
+            # Same as the keys above — the active competitor products this run read
+            # become the COMPETITORPRODUCT cards. Note these are ALL active products,
+            # not the ones resembling the idea: two competitors selling a same-named
+            # product are distinct COMPETITOR_PRODUCT_IDs and so get a card each.
+            resolve:
+              - { field: COMPETITOR_PRODUCT_ID, type: CompetitorProduct, as: PRODUCT_NAME }
+            # If this tab is ever narrowed to just the products resembling the idea, note
+            # that DROPPING this sweep is part of the job: add_context_entities only ever
+            # APPENDS, deduped by (type, id) (execution_state.py), and the similar rows
+            # are a strict subset of the active ones — so leaving this in place would
+            # keep minting the broad cards and mask the narrow ones.
 
       key_data:
         - title: Similar Pipeline Ideas
@@ -410,10 +481,15 @@ processes:
 
 
 
-      # NOTE: policy_rules is documentation only — the EventAgent reads `description`/
-      # `instruction` (the TASK), not this block; the key guidance is folded into
-      # hitl_approval's `instruction` above (brand/health fit and ingredient-sourcing
-      # weight were previously ONLY in this dead block and never reached the model).
+      # NOTE: policy_rules is documentation only FOR THIS PROCESS — it IS parsed into
+      # ProcessDefinition.policy_rules and injected as "POLICY RULES:" by
+      # recommendation_engine.py, but a stepped/agent-driven process runs through the
+      # EventAgent, whose system prompt has no POLICY line and reads only
+      # `instruction`/`description` (the TASK). So don't add decision rules here and
+      # expect them to land — keep this block in sync with hitl_approval's
+      # `instruction` above, which is where the rules that actually decide the
+      # recommendation now live (the decision ladder, the feasibility_verdict and
+      # ingredient-sourcing weighting, brand/health fit, and the web-data caveat).
       policy_rules:
             - "Treat `idea_input` as either a CANDIDATE_ID or raw concept text. Match it against the SOURCE='IDEA' rows of `similarity_candidates`, which is the complete un-truncated set — never against the previewed `all_ideas` fact."
             - "Only consider an idea previously rejected if a matching row has `STAGE = 'Rejected'`. Never infer rejection from similarity alone."
