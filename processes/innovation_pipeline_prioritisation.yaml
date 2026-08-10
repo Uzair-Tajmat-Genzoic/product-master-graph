@@ -1,0 +1,702 @@
+version: 1
+
+processes:
+  # Innovation Pipeline Prioritisation — rank the STANDING pipeline, not one idea.
+  #
+  # idea_capture_triage evaluates a single idea on entry. Nothing ranked the ideas
+  # already in DIM_IDEA, so the ~35-40 active briefs had no comparable priority
+  # (DP1: pipeline lives in a Google Sheet, priority is founder instinct). This
+  # process scores every active brief on the six factors from use-case row #17,
+  # then buys external web research only for the top 3.
+  #
+  # Two-phase on purpose: internal signal is cheap and covers everything; web
+  # research costs 90s per idea, so it goes only where it changes a decision.
+  #
+  # ponytail: gaps that need engine or data changes this YAML can't make alone —
+  # not silently dropped, just not fakeable here:
+  # - `priority_score` is arithmetic done by the model, so it can drift slightly
+  #   run-to-run. A deterministic total needs BOTH an `add`/`sum_cols` op in
+  #   context_collector._compute_where AND a way to post-process agent-produced
+  #   facts (today `post:` only runs on context_package keys), or the score has to
+  #   be persisted to SQL. The per-factor scores are emitted alongside the total so
+  #   a reviewer can always re-add them by hand.
+  # - The web-research fan-out is HARDCODED as three steps. A step gets exactly one
+  #   `skill:` call, and `type: foreach` is a human gate per row (it pauses on every
+  #   item), so there is no way to loop a skill over N ideas silently. A real N-wide
+  #   fan-out needs an agent-loop step type in the engine. Changing shortlist_size
+  #   below means adding/removing research steps to match.
+  # - compliance_readiness and channel_fit are CATEGORY-level proxies, not
+  #   idea-level facts — an idea has no label, barcode or channel listing yet.
+  #   Idea-level needs TARGET_CATEGORY on DIM_IDEA (written by idea_capture_triage
+  #   on approval) plus per-idea label/allergen data. Row #17 calls this factor
+  #   "Known unknown"; the views say so in their header comments too.
+  # - No run-over-run movement ("moved up 4 places since last week") — nothing
+  #   persists a previous ranking. Needs a table plus a write step.
+  # - Row-level review is impossible: every `decision` step in this codebase yields
+  #   ONE enum for the whole batch, never per-row edits.
+  - id: innovation_pipeline_prioritisation
+    name: Innovation Pipeline Prioritisation
+    description: >
+      Ranks every active idea in DIM_IDEA by a structured priority score built from
+      six factors — market signal strength (realised category demand), compliance
+      readiness, COGS vs the manufacturable cost envelope, ingredient availability,
+      channel fit, and time in stage — replacing founder instinct with a comparable,
+      auditable ordering. The top three then get a live web-research pass to confirm
+      or challenge their external market situation, and the whole ranking is put to
+      a single review before it is published.
+    domain: Innovation
+    owner: npd_team
+    definition_type: text
+
+    triggers:
+      # NOTE: the `event` trigger below is INERT on the webhook path, and that is fine.
+      # A webhook needs a TriggerDefinition row (app/api/triggers.py); trigger ids are
+      # NOT derived from this file. The live webhook is
+      # trg_492a74ed-d0a1-4c0a-9900-2c4a1a54fcf7, whose event_type is `idea.prioritisation`
+      # — NOT the `innovation_pipeline_prioritisation` declared here. That mismatch does
+      # nothing, because its workspace_event_config pins `process_id:
+      # innovation_pipeline_prioritisation`, which the orchestrator honours as
+      # `preset_process` and skips event_type-based discovery entirely
+      # (services/triggers/event_processor.py). idea_capture_triage has the identical
+      # mismatch and runs fine — do NOT "align" these names expecting it to fix anything.
+      # Matches the trigger wizard's "Weekly (Mon 9:00 AM UTC)" preset verbatim, so this
+      # declaration and the real TriggerDefinition agree. Prefer a preset over a custom
+      # cron: the actual schedule lives in the trigger row, and a one-off cron here that
+      # nothing enforces just drifts. 5-field crontab, UTC, 1=Monday (the 6-field form
+      # would be APScheduler numbering where 0=Monday — see poll_scheduler._cron_trigger).
+      - { type: schedule, cron: "0 9 * * 1" }   # weekly, Monday 09:00 UTC
+      - { type: event, event_type: innovation_pipeline_prioritisation }
+      - { type: manual, allowed_roles: [npd_team, Admin] }
+
+    # THE EVENT MUST CARRY AT LEAST ONE ATTRIBUTE. This is a full sweep that needs no
+    # business input, but orchestrator.validate_event rejects any event with neither
+    # entity_refs NOR attributes — at stage `received`, BEFORE this file is even loaded.
+    # A sweep resolves no entity from the event, so an attribute is the only way through
+    # that gate, and build_business_event deliberately SKIPS the injected `eventType`
+    # key, so it does not count. Getting this wrong fails in ~9ms with "event must
+    # reference at least one entity or carry attributes", and the UI then shows its
+    # generic "the agent couldn't complete context collection or reach a recommendation"
+    # copy — which is misleading, because nothing ran. That is exactly how this process
+    # failed its first two runs, on a body of `{}`.
+    #
+    # WHAT SATISFIES THE GATE depends on the TriggerDefinition, not on this file:
+    #  - trigger has NO field_mapping  -> the raw body IS the attributes, so `{}` fails.
+    #  - trigger HAS a field_mapping   -> extract_fields emits ONE KEY PER MAPPING ENTRY
+    #    even when the JSONPath misses (value null), so attributes are never empty and
+    #    even `{}` passes. The live webhook maps `run_reason`, so it is in this second
+    #    case. Note a field_mapping is a WHITELIST: any body key that is not mapped is
+    #    silently dropped, so mapping `run_reason` alone is what keeps this working.
+    inputs:
+      - { name: run_reason, type: string, required: false,
+          description: "Short free text on why this cycle was run (e.g. \"weekly sweep\",
+            \"re-run after COGS fix\"). No step reads it — it is provenance on the event
+            record, and it is the single mapped field keeping attributes non-empty.
+            `required: false` is honest: `process.inputs` is documentation projected onto
+            the graph node, never parsed by the engine, so it constrains nothing at
+            runtime. The webhook trigger's field_mapping is the real contract." }
+
+    # NOTE: there is deliberately NO `final_ranking` output. It used to exist and was
+    # ALWAYS null — see the comment on finalise_ranking below. The top-3 external view
+    # is rendered straight from `external_signal_1/2/3` by the key_data cards instead.
+    outputs:
+      - { name: ranked_pipeline, type: object }
+      - { name: final_summary, type: string }
+      - { name: decision, type: enum, values: [APPROVE, REJECT, ESCALATE] }
+
+    steps:
+      # 1. The ONLY step that sees all ~38 briefs. It has to be one step:
+      # _compact_facts previews any list fact longer than 4 rows down to 4, and only
+      # a step's own `fetch` lands un-previewed (in STEP INPUT DATA), so a 38-row
+      # brief list cannot be handed to a second step for scoring. Everything the
+      # scoring needs therefore arrives through the single fetch below.
+      - id: score_and_rank_pipeline
+        name: Score & Rank Active Briefs
+        type: agent
+        description: >
+          Scores every active brief on the six priority factors using pre-computed
+          category demand, cost-envelope and compliance data, then ranks the whole
+          pipeline and names the top three for external research.
+        # Un-truncated candidate read. `limit` is explicit because _run_step_fetch
+        # defaults it to 10, which would silently score 10 of ~38 briefs.
+        # `order_by: SRC` is load-bearing: SRC sorts BRIEF < CATEGORY < ENVELOPE <
+        # INGREDIENT, and STEP INPUT DATA truncates its TAIL at 9000 chars, so an
+        # overflow costs ingredient scoring before it costs the briefs themselves.
+        fetch:
+          entity_type: Product
+          source_table: V_PIPELINE_PRIORITY_CANDIDATES
+          columns: [SRC, ID, NAME, DATA]
+          order_by: SRC
+          order_dir: asc
+          limit: 400
+          as: priority_candidates
+        # THE 200-CHAR RULE governs every scalar below. A later step reads a fact
+        # through _compact_facts(budget=4000), which on overflow gives EVERY key only
+        # `max(200, 4000 // <number of facts>)` chars — in practice the 200 floor. So
+        # anything a later step must read IN FULL has to be its own small fact:
+        # `ranked_pipeline` (~1.5k) reaches finalise_ranking cut to 200 chars, mid-JSON.
+        # That is why the shortlist_* scalars exist and why _score / _band were added.
+        # Keep every one of them SHORT. The key_data cards read facts directly and are
+        # not subject to this, so the full ranking still renders for the reviewer.
+        produces:
+          - ranked_pipeline
+          - pipeline_summary
+          - band_counts
+          - shortlist_reason
+          - unknowns_count
+          - shortlist_1_name
+          - shortlist_1_category
+          - shortlist_1_score
+          - shortlist_1_band
+          - shortlist_2_name
+          - shortlist_2_category
+          - shortlist_2_score
+          - shortlist_2_band
+          - shortlist_3_name
+          - shortlist_3_category
+          - shortlist_3_score
+          - shortlist_3_band
+        instruction: >
+          `priority_candidates` is the COMPLETE, un-truncated input set. Read the
+          `SRC` column to know what each row is, and decode the abbreviated `DATA`
+          string with this legend:
+          `SRC='BRIEF'` — one active idea. `ID` is its IDEA_ID, `NAME` its name.
+          DATA is POSITIONAL, pipe-delimited, with exactly four fields in this order:
+          `stage|days_in_stage|target_cogs_inr|cogs_fit`. So `Feasibility|134|142.5|INSIDE`
+          means stage Feasibility, 134 days in that stage, a target COGS of ₹142.5, and
+          that target sitting INSIDE the manufacturable envelope. `cogs_fit` is one of
+          `INSIDE`/`BELOW`/`ABOVE`/`UNKNOWN`; `days_in_stage` or `target_cogs_inr` may be
+          the literal `unknown`.
+          `SRC='CATEGORY'` — one product category, `NAME` is the category name.
+          DATA: `units90`/`prior90`=units sold in the last 90 days and the 90 before
+          that, `growth_pct`=percent change (`no_baseline` when there were no prior
+          sales), `fcast`=forecast units next 1-3 days, `skus`=active SKUs,
+          `chan`=channels this category is listed on out of the channels mapped to it,
+          as `listed/mapped`, `chan_names`=which ones,
+          `label_ok`/`barcode`/`allergen`=how many of that category's active SKUs
+          carry label compliance, a barcode, and declared allergens,
+          `comp_products`/`comp_brands`=active competitor products and brands.
+          `SRC='ENVELOPE'` — one row: `cogs_min`/`cogs_max`, the COGS range this
+          company actually manufactures inside.
+          `SRC='INGREDIENT'` — one row whose DATA is `count=<n>; list=<complete|partial>;
+          names: <comma-separated list>; end_of_list`, the ingredients the company
+          already sources. Presence means "we already buy this"; absence means net-new
+          sourcing would be required. It carries NO stock quantities — never state or
+          imply that an ingredient is in or out of stock, only that it is already
+          sourced or would be net-new.
+          COMPLETENESS CHECK, do this before scoring any ingredient factor. DO NOT
+          COUNT THE NAMES — the count is unreliable to eyeball and the names themselves
+          contain commas ("a non-caloric sweetener blend (erythritol, stevia,
+          allulose)" is ONE ingredient, not three), so counting gives a wrong answer.
+          Read the two markers instead:
+          the master is WHOLE when `list=complete` AND the row ends with the literal
+          `end_of_list`. In that case score `ingredient_availability` normally — an
+          ingredient you cannot match IS genuinely net-new, and you must NOT call the
+          master partial or hedge to the neutral score.
+          The master is CUT only when `list=partial`, or when the `end_of_list`
+          terminator is missing (the row was truncated before its end). ONLY THEN:
+          treat any ingredient you cannot match as UNKNOWN rather than net-new, score
+          those briefs' `ingredient_availability` at the neutral 2.5, add
+          `ingredient_availability` to their `unknowns`, and say the master was partial
+          in the `### Data Gaps` card. Never report net-new sourcing off a cut list.
+
+          For EVERY `SRC='BRIEF'` row, in order:
+          (1) Infer its target category by matching the brief's name against the
+          `SRC='CATEGORY'` names. Choose ONLY from those names — never invent a
+          category. If nothing matches, use the closest one and say so in `reason`.
+          (2) Derive the 5-12 ingredients the product would plausibly need — be
+          concrete ("whey protein isolate", "dates", "cocoa powder"), not categories
+          — and match each against the `SRC='INGREDIENT'` list by meaning rather
+          than exact string ("Almonds" matches "almond"; "Fresh cream" matches
+          "cream"), only claiming a match when a specific listed ingredient supports
+          it.
+          (3) Score each of these six factors from 0 to 5 (0 = worst, 5 = best):
+          `market_signal` — the inferred category's `units90` and `growth_pct`. High
+          volume with positive growth scores 5; no sales and `no_baseline` scores 0.
+          Treat `comp_products`/`comp_brands` as a TIEBREAKER ONLY, never as the
+          main driver: it comes from 16 hand-curated competitor rows, and a value of
+          `not_comparable` means the competitor category vocabulary doesn't line up
+          with ours — it does NOT mean "no competitors" and must not move a score.
+          `compliance_readiness` — the `label_ok`/`barcode`/`allergen` ratios for the
+          inferred category: a category where nearly every SKU is labelled, barcoded
+          and allergen-declared is a well-trodden compliance path (5); one where few
+          are is not (0). This is a CATEGORY-level proxy — an idea has no label yet —
+          so never describe it as this idea's own compliance status.
+          `cogs_vs_target` — `fit`. INSIDE scores 5; BELOW scores 4 (cheaper than
+          anything we make today, so the margin looks good but the target is
+          unproven); ABOVE scores 2; UNKNOWN is unscorable — see the rule below.
+          `ingredient_availability` — the share of derived ingredients matched in the
+          already-sourced list: 5 at roughly 80% or more, 0 when almost nothing
+          matches and the idea implies a whole net-new supply chain.
+          `channel_fit` — the `chan` ratio (`listed/mapped`) for the inferred category:
+          score 5 when nearly every mapped channel is listed, 0 when almost none is.
+          BE AWARE this factor barely discriminates on current data — channel mapping
+          is blanket rather than SKU-specific, so most categories sit at or near
+          `mapped/mapped`. Treat a high ratio as "distribution exists", not as a
+          reason to rank one brief above another, and never make it the headline of a
+          `reason`. It will start discriminating when channel mapping becomes
+          per-SKU.
+          `time_in_stage` — `days`. LONGER SCORES HIGHER: a brief sitting a long time
+          in one stage needs a decision more urgently than a fresh one. Score 5 at
+          roughly 90+ days, 0 for a brief that has just arrived. `unknown` days is
+          unscorable — see the rule below.
+          UNSCORABLE FACTORS: when the underlying value is `unknown` (e.g. `fit=UNKNOWN`
+          or `days=unknown`), score that factor 2.5 — the neutral midpoint, so missing
+          data neither rewards nor punishes the brief — and add the factor's name to
+          that row's `unknowns` list. Never score a missing value 0 or 5.
+          (4) Compute `priority_score` = market_signal x 5 + cogs_vs_target x 4 +
+          ingredient_availability x 4 + compliance_readiness x 3 + channel_fit x 2 +
+          time_in_stage x 2. The weights sum to 20, so the maximum is 100. Round to
+          one decimal place. Show the per-factor scores as well as the total so the
+          number can be re-added by hand.
+          (5) Assign `priority_band`: HIGH at 70 or above, MEDIUM from 45 to below
+          70, LOW below 45.
+
+          Return `ranked_pipeline`: a list with ONE object per brief, SORTED BY
+          `priority_score` DESCENDING, using EXACTLY these keys: {"rank": <1-based
+          position, dense, no ties>, "IDEA_ID": <ID>, "NAME": <NAME>, "STAGE": <stg>,
+          "DAYS_IN_STAGE": <days>, "inferred_category": <a CATEGORY name>,
+          "market_signal": <0-5>, "compliance_readiness": <0-5>, "cogs_vs_target":
+          <0-5>, "ingredient_availability": <0-5>, "channel_fit": <0-5>,
+          "time_in_stage": <0-5>, "priority_score": <0-100>, "priority_band":
+          <HIGH|MEDIUM|LOW>, "unknowns": [<factor names scored 2.5 for missing data>],
+          "reason": <ONE factual sentence, 25 words or fewer, citing the specific
+          numbers that drove this score>}. Break exact score ties by later stage
+          first (Development ahead of Capture), then by more days in stage. Include
+          EVERY brief — never a subset, never the CATEGORY/ENVELOPE/INGREDIENT rows.
+
+          ALSO produce `pipeline_summary`: a set of titled cards, each a short
+          markdown heading (`### Title`) followed by 1-3 concise factual lines drawn
+          from the scores — no padding, no speculation. Produce exactly these three
+          cards, in order: `### Top Priorities` (the top 3 named with their score and
+          the single strongest reason each), `### Held Back` (what is scoring LOW and
+          why — the common factor), `### Data Gaps` (how many briefs had unscorable
+          factors and which factors, or "None found"). Do not paste the table.
+
+          ALSO produce `band_counts`: an object {"HIGH": <int>, "MEDIUM": <int>,
+          "LOW": <int>, "total": <int>}.
+          ALSO produce `shortlist_reason`: ONE factual sentence (no heading, 25 words
+          or fewer) naming the top three briefs and what they have in common.
+
+          ALSO produce `unknowns_count`: a SHORT string, at most 15 words, saying how
+          many briefs carried at least one unscorable factor and naming the factors —
+          e.g. "3 of 3 briefs: ingredient_availability; 1 also cogs_vs_target" — or
+          "None" when every factor scored. finalise_ranking's `### Confidence & Gaps`
+          card is written from THIS, not from `ranked_pipeline`.
+
+          ALSO produce TWELVE SEPARATE FLAT FIELDS for the top three briefs —
+          `shortlist_1_name`, `shortlist_1_category`, `shortlist_1_score`,
+          `shortlist_1_band`, and the same four for `shortlist_2_*` and
+          `shortlist_3_*` — where `shortlist_1_*` is rank 1, `shortlist_2_*` is rank 2
+          and `shortlist_3_*` is rank 3. `_name` is that brief's NAME verbatim;
+          `_category` is its `inferred_category`; `_score` is its `priority_score` as a
+          string (e.g. "77.0"); `_band` is its `priority_band`.
+          These are plain scalars, NOT a list, for two reasons: the research steps
+          template `_name`/`_category` into a skill argument, and finalise_ranking can
+          only read facts that are individually under ~200 characters (see the
+          200-CHAR RULE above) — it CANNOT read `ranked_pipeline`, so `_score` and
+          `_band` are the only way those numbers reach it intact. Keep each one short.
+          If there are fewer than three briefs, set every field of the missing ranks
+          to the literal string "NONE". NEVER null and NEVER an empty string — the
+          steps that consume these are guarded by a condition that compares against
+          "NONE", and a null would break that comparison and run the step anyway.
+
+      # 2-4. External web research on the shortlist — ONE step per brief.
+      # A step gets exactly one `skill:` call, and `foreach` would pause for a human
+      # on every row (breaking Low HITL), so the fan-out is unrolled by hand. Each
+      # step is strictly `after` the previous one: the skill has a 90s timeout and
+      # these are three live web searches.
+      # The `condition` compares against the "NONE" sentinel that step 1 guarantees.
+      # It must NOT be written as `!= null`: _condition_met renders a missing fact as
+      # JSON `null`, which is not valid Python, so the eval throws — and a throwing
+      # condition RUNS the step rather than skipping it (event_agent.py logs a
+      # warning and returns True).
+      - id: research_shortlist_1
+        name: External Market Check — Priority 1
+        type: agent
+        description: Live web research on the top-ranked brief's external market situation.
+        after: score_and_rank_pipeline
+        condition: '{{shortlist_1_name}} != "NONE"'
+        skill:
+          name: research-market-situation
+          operation: run
+          args:
+            idea_input: "{{shortlist_1_name}}"
+            target_category: "{{shortlist_1_category}}"
+          as: market_research_1
+        # `external_signal_1` is the RICH object — the key_data cards read it directly
+        # and un-truncated. `external_1_score` / `external_1_reason` duplicate two of
+        # its fields as their OWN small facts purely so finalise_ranking can read them:
+        # the object itself is ~500 chars and reaches that step cut to 200 (see the
+        # 200-CHAR RULE on step 1). Duplication is deliberate, not an oversight.
+        produces: [external_signal_1, external_1_score, external_1_reason]
+        instruction: >
+          The web-research skill has already run for the rank-1 brief
+          (`shortlist_1_name`); its raw payload is in `market_research_1` —
+          price / where-sold / customer-reach lines from a live web search. Reason
+          over `market_research_1` ONLY and never invent data beyond it.
+          Return `external_signal_1` as a single object (NOT a list) with EXACTLY
+          these keys: {"NAME": <shortlist_1_name>, "price_line": <typical retail
+          price range with currency and an example seller, or "None found">,
+          "where_sold_line": <retailers, marketplaces or channels carrying this or
+          comparable products, or "None found">, "customer_reach_line": <traction
+          signals — review counts, ratings, popularity, leading brands — or "None
+          found">, "external_score": <0-5, how strong the external market situation
+          looks: 5 = clear demand at a healthy price across several channels, 0 = no
+          usable external signal at all>, "external_reason": <ONE factual sentence,
+          25 words or fewer, leading with the headline price point, main channel and
+          traction signal>}.
+          If the web search returned nothing usable, set the three lines to "None
+          found", `external_score` to 0 and `external_reason` to "No external market
+          signal found". Set any field you cannot determine to null — never invent values.
+
+          ALSO produce TWO SEPARATE FLAT FIELDS, copied verbatim from the object you
+          just built so they cannot disagree with it: `external_1_score` = that
+          object's `external_score` as a string (e.g. "5"), and `external_1_reason` =
+          its `external_reason` sentence. Plain scalars, never null, never an object —
+          finalise_ranking reads ONLY these two and never `external_signal_1` itself.
+
+      - id: research_shortlist_2
+        name: External Market Check — Priority 2
+        type: agent
+        description: Live web research on the second-ranked brief's external market situation.
+        after: research_shortlist_1
+        condition: '{{shortlist_2_name}} != "NONE"'
+        skill:
+          name: research-market-situation
+          operation: run
+          args:
+            idea_input: "{{shortlist_2_name}}"
+            target_category: "{{shortlist_2_category}}"
+          as: market_research_2
+        produces: [external_signal_2, external_2_score, external_2_reason]
+        instruction: >
+          Identical to the rank-1 research step, for the rank-2 brief
+          (`shortlist_2_name`), reasoning over `market_research_2` ONLY.
+          Return `external_signal_2` as a single object (NOT a list) with EXACTLY
+          these keys: {"NAME": <shortlist_2_name>, "price_line": <…>,
+          "where_sold_line": <…>, "customer_reach_line": <…>, "external_score":
+          <0-5>, "external_reason": <ONE sentence, 25 words or fewer>}, using the
+          same "None found" / score-0 / "No external market signal found" fallbacks
+          when the search returned nothing usable. Never invent data beyond
+          `market_research_2`.
+          ALSO produce `external_2_score` and `external_2_reason` as separate flat
+          scalars copied verbatim from that object, exactly as the rank-1 step does —
+          these are what finalise_ranking reads.
+
+      - id: research_shortlist_3
+        name: External Market Check — Priority 3
+        type: agent
+        description: Live web research on the third-ranked brief's external market situation.
+        after: research_shortlist_2
+        condition: '{{shortlist_3_name}} != "NONE"'
+        skill:
+          name: research-market-situation
+          operation: run
+          args:
+            idea_input: "{{shortlist_3_name}}"
+            target_category: "{{shortlist_3_category}}"
+          as: market_research_3
+        produces: [external_signal_3, external_3_score, external_3_reason]
+        instruction: >
+          Identical to the rank-1 research step, for the rank-3 brief
+          (`shortlist_3_name`), reasoning over `market_research_3` ONLY.
+          Return `external_signal_3` as a single object (NOT a list) with EXACTLY
+          these keys: {"NAME": <shortlist_3_name>, "price_line": <…>,
+          "where_sold_line": <…>, "customer_reach_line": <…>, "external_score":
+          <0-5>, "external_reason": <ONE sentence, 25 words or fewer>}, using the
+          same "None found" / score-0 / "No external market signal found" fallbacks
+          when the search returned nothing usable. Never invent data beyond
+          `market_research_3`.
+          ALSO produce `external_3_score` and `external_3_reason` as separate flat
+          scalars copied verbatim from that object, exactly as the rank-1 step does —
+          these are what finalise_ranking reads.
+
+      # 5. Judge the external checks against the internal ranking.
+      #
+      # THIS STEP HAS NO `fetch` AND NO `skill`, AND THAT IS WHY IT IS FRAGILE.
+      # _step_input_keys() returns only a step's own fetch/skill `as` keys, so this
+      # step gets NO "STEP INPUT DATA" block (the un-truncated 9000-char slot). Every
+      # fact it can see arrives via _compact_facts(rest, budget=4000), which on
+      # overflow hands each key only `max(200, 4000 // <fact count>)` chars — with ~20
+      # facts in play that is the 200-char FLOOR, applied by slicing the JSON mid
+      # structure.
+      #
+      # An earlier version of this step read `ranked_pipeline` (~1.5k) and
+      # `external_signal_1/2/3` (~500 each) and produced a `final_ranking` table from
+      # them. It returned null for EVERY output on every run: it was handed four
+      # truncated JSON fragments and correctly followed its system prompt's "if a
+      # produced value cannot be determined, set it null". The reviewer saw empty
+      # cards. Do not reintroduce that shape.
+      #
+      # So: this step now reads ONLY small scalar facts (each well under 200 chars,
+      # so the shrink never touches them) and produces only prose. The rich per-brief
+      # external detail is NOT rebuilt here — the key_data cards below read
+      # `external_signal_1/2/3` DIRECTLY, which bypasses _compact_facts entirely.
+      # If you add anything to this step's inputs, it must be a small scalar.
+      - id: finalise_ranking
+        name: Finalise Ranked Pipeline
+        type: agent
+        description: >
+          Judges the live external market checks against the internal ranking of the
+          top three and writes the reviewer-facing summary.
+        after: research_shortlist_3
+        produces: [final_summary, external_reason, confidence_1, confidence_2, confidence_3]
+        instruction: >
+          Work ONLY from these small facts — do NOT read `ranked_pipeline`,
+          `external_signal_1/2/3`, `priority_candidates` or `pipeline_summary`. Those
+          reach this step truncated mid-JSON and anything drawn from them will be
+          wrong. If a fact below is missing or reads "NONE", that rank did not exist.
+          Per rank N (1, 2, 3): `shortlist_N_name`, `shortlist_N_category`,
+          `shortlist_N_score`, `shortlist_N_band`, `external_N_score` (0-5) and
+          `external_N_reason` (one sentence on price, channel and traction).
+          Across the pipeline: `band_counts` (HIGH/MEDIUM/LOW/total), `shortlist_reason`
+          and `unknowns_count`.
+
+          CRITICAL: the external research covers only the top 3 briefs. It is
+          directional context ONLY. It may CONFIRM, CAVEAT or FLAG them — it must
+          NEVER re-order the ranking, never change any `priority_score`, and a brief
+          with no external signal must NOT be penalised for lacking one. The internal
+          score is the ranking; this step annotates it.
+
+          Produce `confidence_1`, `confidence_2` and `confidence_3` — ONE WORD each,
+          exactly one of CONFIRMED / MIXED / CONTRADICTED, judging that rank's
+          `external_N_reason` and `external_N_score` against its `shortlist_N_score`
+          and `shortlist_N_band`. CONFIRMED when the external picture supports the
+          internal score, MIXED when it is partly supportive or thin, CONTRADICTED
+          when it argues against the brief. Use the literal string "NONE" for any rank
+          that did not exist — never null.
+
+          ALSO produce `final_summary`: titled markdown cards, same format as
+          `pipeline_summary` (`### Title` heading, 1-3 concise factual lines, "None
+          found" when empty). Produce exactly these three cards, in order:
+          `### Recommended Priorities` — the top three by name with their
+          `shortlist_N_score` and `shortlist_N_band`, and their confidence verdict.
+          `### External Signal` — what the web research actually said, drawn from the
+          three `external_N_reason` sentences.
+          `### Confidence & Gaps` — how far this ranking can be trusted: quote
+          `unknowns_count` for the unscorable factors, note any rank whose
+          `external_N_score` is 0 (an empty search), and state that only the top three
+          were researched externally. Do not paste any table.
+
+          ALSO produce `external_reason`: ONE factual sentence (no heading, 25 words
+          or fewer) summarising whether external research confirmed the top three.
+
+      # 6. GATE — the single low-touch review. Everything above has already run
+      # (metadata.run_steps_before_gate), so the reviewer sees a finished ranking.
+      - id: pipeline_review
+        name: Publish Ranked Pipeline
+        type: decision
+        description: >
+          NPD / Portfolio / Marketing review the ranked pipeline and the external
+          check on the top three, and approve it as this cycle's priority order.
+        after: finalise_ranking
+        # This is the model's TASK for the decision: event_agent.py resolves
+        # `step.instruction or step.description or step.name`, so this REPLACES the
+        # description above and has to carry the review framing as well as the
+        # rules. The rules below are the ones that decide the recommendation —
+        # `policy_rules` in metadata is never read on the EventAgent path (its
+        # system prompt has no POLICY line), so decision rules put only there would
+        # reach the model nowhere.
+        instruction: >
+          Review the ranked pipeline — every active brief scored on market signal,
+          compliance readiness, COGS vs target, ingredient availability, channel fit
+          and time in stage — together with the external market check on the top
+          three, and recommend exactly one of APPROVE, REJECT or ESCALATE.
+          APPROVE when the ordering is defensible: the top briefs are there for
+          reasons visible in the data, and external research did not contradict them.
+          REJECT when a factor is materially mis-scored — a brief ranked high on a
+          category with no sales, an ingredient claim the sourced list does not
+          support, or a score that does not follow from its own per-factor numbers.
+          ESCALATE when the ranking cannot be trusted rather than being wrong: a
+          large share of briefs carrying unscorable factors (most often a missing
+          target COGS or a missing stage date), all three external searches returning
+          nothing, or the pipeline being too thin to rank at all.
+          Judge the score, not the idea: this step decides whether the ORDERING is
+          sound, not whether any individual product should be built.
+          The `external_signal_*` cards and the `confidence_*` verdicts are live web
+          data and are directional context only — never reject the whole ranking on
+          external data alone, and never treat a brief's lack of external research as
+          evidence against it.
+          Remember that compliance_readiness and channel_fit are category-level
+          proxies, so a brief in a well-covered category has an easier compliance
+          path, not a compliant label.
+        rationale_from: final_summary
+        decision_options: [APPROVE, REJECT, ESCALATE]
+
+    metadata:
+      version: 1
+      effective_from: 2026-08-05
+      priority: 12
+      requires_human_approval: true
+      # Run every agent step (scoring, the three external checks, finalisation)
+      # BEFORE pausing, so ranked_pipeline / external_signal_* / final_summary are
+      # materialised and bind to the key_data cards and the gate's rationale.
+      run_steps_before_gate: true
+      # NOT set: run_actions_on_decision. This process publishes a ranking to the
+      # reviewer as key_data cards and deliberately has NO side effects — nothing is
+      # emailed and DIM_IDEA is not written. Add it (plus an `actions:` block) if a
+      # writeback or digest is ever wanted; note that a dataset_upsert action fires
+      # ONCE per decision, not once per row, so ~38 rows would need a foreach step.
+
+      # Single source of truth for the scoring weights. The ladder in
+      # score_and_rank_pipeline's instruction must stay numerically in sync — agent
+      # instructions are plain text, not templated from metadata, so this file has
+      # no way to make the prompt read these values automatically.
+      # Weights sum to 20 and each factor scores 0-5, so priority_score maxes at 100.
+      scoring_weights:
+        market_signal: 5
+        cogs_vs_target: 4
+        ingredient_availability: 4
+        compliance_readiness: 3
+        channel_fit: 2
+        time_in_stage: 2
+
+      scoring_bands:
+        high_gte: 70
+        medium_gte: 45
+
+      # Documents the web-research fan-out. Changing this number means adding or
+      # removing `research_shortlist_N` steps by hand — see the ponytail note.
+      shortlist_size: 3
+
+      # Only the web-research skill is needed: the scoring step reasons purely over
+      # its own fetch and calls no tools. allow_unlisted_skills: false and
+      # connectors: [] stop the agent reaching for anything unrelated.
+      tools:
+        skills: ["research-market-situation"]
+        allow_unlisted_skills: false
+        connectors: []
+
+      context_package:
+        # Reviewer-facing raw inputs — the audit trail behind every score. This is a
+        # list fact, so _compact_facts previews it to 4 rows for the LLM; that is
+        # fine, because the scoring step reads the briefs through its own fetch and
+        # this key exists for the key_data card, which reads facts directly.
+        - key: active_briefs
+          source: dataset_search
+          required: true
+          query:
+            entity_type: Product
+            dataset: V_IDEA_PRIORITY_INPUTS
+            columns: [IDEA_ID, NAME, STAGE, DAYS_IN_STAGE, TARGET_COGS_INR, COGS_FIT, PORTFOLIO_MIN_COGS_INR, PORTFOLIO_MAX_COGS_INR, THESIS_FIT]
+            order_by: IDEA_ID
+            order_dir: asc
+            limit: 300
+
+        # The evidence behind the market_signal factor, shown as its own card so a
+        # reviewer can check a score against the category's actual sales.
+        - key: category_signal
+          source: dataset_search
+          required: false
+          query:
+            entity_type: Product
+            dataset: V_CATEGORY_MARKET_SIGNAL
+            columns: [CATEGORY_NAME, UNITS_90D, NET_REVENUE_90D, UNITS_PRIOR_90D, GROWTH_PCT, FORECAST_UNITS_NEXT, ACTIVE_SKUS_IN_CATEGORY, ACTIVE_COMPETITOR_PRODUCTS]
+            order_by: CATEGORY_NAME
+            order_dir: asc
+            limit: 100
+
+        # Mints Category nodes onto the run's entity snapshot. This process resolves
+        # NO entity from the event (a full sweep carries no `*_id`), so entity_refs is
+        # empty and save_entity_snapshot would write `entities: []` — and the UI hides
+        # the whole Full Context tab when that list is empty (page.tsx TABS.filter).
+        # `as` deliberately names a column the query already selects, so the
+        # graph-resolved name is written first and the BigQuery value then restored:
+        # the card is labelled correctly whether or not the Category node exists.
+        - key: active_categories
+          source: dataset_search
+          required: false
+          query:
+            entity_type: Category
+            dataset: DIM_CATEGORY
+            columns: [CATEGORY_ID, CATEGORY_NAME]
+            order_by: CATEGORY_NAME
+            order_dir: asc
+            limit: 100
+          post:
+            resolve:
+              - { field: CATEGORY_ID, type: Category, as: CATEGORY_NAME }
+
+        - { key: scheduled_at, source: event, required: false }
+
+      # "Data used" cards at the gate. `from` must resolve to a produced fact or a
+      # context_package key; the UI supports table / markdown / image views only.
+      # These read the facts DIRECTLY (not through _compact_facts), so the full
+      # ~38-row ranking renders here even though a later LLM step would see 4 rows.
+      key_data:
+        - title: Ranked Pipeline
+          summary: Every active brief in priority order, with the score and the reason behind it.
+          views:
+            - view: table
+              from: ranked_pipeline
+              columns: [rank, NAME, STAGE, inferred_category, priority_score, priority_band, reason]
+
+        - title: Factor Breakdown
+          summary: The six per-factor scores (0-5) behind each brief's total, plus any factor that could not be scored.
+          views:
+            - view: table
+              from: ranked_pipeline
+              columns: [rank, NAME, market_signal, compliance_readiness, cogs_vs_target, ingredient_availability, channel_fit, time_in_stage, priority_score, unknowns]
+
+        # These three read the RESEARCH STEPS' OWN objects directly, one view per
+        # rank. They used to read a single `final_ranking` table that finalise_ranking
+        # rebuilt from them — which was always null, because that step sees those
+        # objects truncated (see the block comment on finalise_ranking). Reading the
+        # source facts here removes the lossy hop entirely: key_data is not subject to
+        # _compact_facts, so each object renders in full. A dict fact renders as a
+        # Field/Value table, which is what the engine already does for these facts on
+        # the per-step cards. A rank that did not run simply renders empty.
+        - title: Top 3 — External Market Check
+          summary: Live web research on the three highest-ranked briefs — price, channels, traction, and the score behind each.
+          views:
+            - { view: table, from: external_signal_1 }
+            - { view: table, from: external_signal_2 }
+            - { view: table, from: external_signal_3 }
+
+        # Two SEPARATE cards, not two views on one card: markdown views carry no
+        # per-view label, so stacking both here rendered as two tabs both titled
+        # "Notes" and the card read as empty whenever the first one was blank.
+        - title: Priority Summary
+          summary: What to act on this cycle, and whether the external check confirmed it.
+          views:
+            - { view: markdown, from: final_summary }
+
+        - title: Scoring Summary
+          summary: How the internal scoring landed — top priorities, what is held back, and where data was missing.
+          views:
+            - { view: markdown, from: pipeline_summary }
+
+        - title: Category Demand
+          summary: Realised sales per category — the evidence behind the market-signal factor. Competitor counts are a tiebreaker only.
+          views:
+            - view: table
+              from: category_signal
+              columns: [CATEGORY_NAME, UNITS_90D, UNITS_PRIOR_90D, GROWTH_PCT, FORECAST_UNITS_NEXT, ACTIVE_SKUS_IN_CATEGORY, ACTIVE_COMPETITOR_PRODUCTS]
+
+        - title: Raw Scoring Inputs
+          summary: The deterministic per-brief inputs from BigQuery, so any score can be audited against the data it came from.
+          views:
+            - view: table
+              from: active_briefs
+              columns: [IDEA_ID, NAME, STAGE, DAYS_IN_STAGE, TARGET_COGS_INR, COGS_FIT, PORTFOLIO_MIN_COGS_INR, PORTFOLIO_MAX_COGS_INR]
+
+      # NOTE: policy_rules is documentation only FOR THIS PROCESS — it IS parsed into
+      # ProcessDefinition.policy_rules and injected as "POLICY RULES:" by
+      # recommendation_engine.py, but a stepped/agent-driven process runs through the
+      # EventAgent, whose system prompt has no POLICY line and reads only
+      # `instruction`/`description` (the TASK). So don't add decision rules here and
+      # expect them to land — keep this block in sync with pipeline_review's
+      # `instruction` above, which is where the rules that actually decide the
+      # recommendation live.
+      policy_rules:
+        - "`priority_candidates` is the complete un-truncated input set; read `SRC` to tell briefs from category, envelope and ingredient reference rows, and score every `SRC='BRIEF'` row — never a subset."
+        - "Market signal comes from realised category demand (`units90`, `growth_pct`). Competitor counts are a TIEBREAKER ONLY — they come from 16 hand-curated rows, and `not_comparable` means the category vocabularies don't align, not that there are no competitors."
+        - "The ingredient list records only what is already sourced, with no stock quantities — never state that an ingredient is in or out of stock, only that it is already sourced or would be net-new."
+        - "compliance_readiness and channel_fit are CATEGORY-level proxies. A brief in a well-covered category has an easier compliance path, not a compliant label."
+        - "A factor whose input is `unknown` scores 2.5 (the neutral midpoint) and is named in that row's `unknowns` list — never 0 and never 5."
+        - "time_in_stage scores HIGHER the longer a brief has sat: an aging brief needs a decision more urgently than a fresh one."
+        - "External web research covers only the top 3 of ~38 briefs. It may confirm, caveat or flag them, but must never re-order the ranking or change a `priority_score`, and a brief without external research must not be penalised for it."
+        - "Recommend:
+          • APPROVE when the ordering is defensible and external research did not contradict the top briefs.
+          • REJECT when a factor is materially mis-scored, or a score does not follow from its own per-factor numbers.
+          • ESCALATE when the ranking cannot be trusted rather than being wrong — many unscorable factors, all external searches empty, or too few briefs to rank."

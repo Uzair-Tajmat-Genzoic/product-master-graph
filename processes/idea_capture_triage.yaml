@@ -359,7 +359,7 @@ processes:
           query:
             entity_type: Product
             dataset: DIM_IDEA
-            columns: [IDEA_ID, NAME, STAGE, HYPOTHESIS, THESIS_FIT, TARGET_COGS_INR]
+            columns: [IDEA_ID, NAME, STAGE, HYPOTHESIS, THESIS_FIT, TARGET_COGS_INR, STAGE_ENTERED_AT]
             order_by: IDEA_ID
             order_dir: asc
             limit: 300
@@ -452,7 +452,7 @@ processes:
           views:
             - view: table
               from: similar_ideas
-              columns: [IDEA_ID, NAME, STAGE, HYPOTHESIS, THESIS_FIT, TARGET_COGS_INR]
+              columns: [IDEA_ID, NAME, STAGE, HYPOTHESIS, THESIS_FIT, TARGET_COGS_INR, STAGE_ENTERED_AT]
 
         - title: Ingredient Availability
           summary: Which of the idea's ingredients we already source, and what would be net-new.
