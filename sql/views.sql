@@ -108,40 +108,20 @@ LEFT JOIN `gen-lang-client-0520145261.ctx_upside_master_data.DIM_COMPETITOR` cm
   ON cm.COMPETITOR_ID = cp.COMPETITOR_ID AND cm.IS_ACTIVE
 WHERE cp.IS_ACTIVE;
 
--- Time in stage: DAYS_IN_STAGE computed live in SQL (CURRENT_DATE()), not left
--- for a step's LLM pass to guess — a model has no reliable clock of its own.
--- Requires DIM_IDEA.STAGE_ENTERED_AT (see sql/alter_dim_idea.sql, run first).
--- This is "days in the current STAGE", not "days since first captured" —
--- STAGE_ENTERED_AT resets to CURRENT_TIMESTAMP() each time STAGE changes
--- (conditional CASE in dataset_upsert's MERGE), so the clock restarts on
--- every stage transition.
-CREATE OR REPLACE VIEW `gen-lang-client-0520145261.ctx_upside_master_data.V_IDEA_STAGE_AGE` AS
-SELECT
-  IDEA_ID,
-  NAME,
-  STAGE,
-  STAGE_ENTERED_AT,
-  DATE_DIFF(CURRENT_DATE(), DATE(STAGE_ENTERED_AT), DAY) AS DAYS_IN_STAGE
-FROM `gen-lang-client-0520145261.ctx_upside_master_data.DIM_IDEA`;
-
 -- ---------------------------------------------------------------------
 -- Innovation pipeline prioritisation (processes/innovation_pipeline_prioritisation.yaml)
 -- ---------------------------------------------------------------------
 
--- Scoring inputs, one row per ACTIVE brief. Every number a machine can know is
--- computed here so the process's LLM pass only reads and explains it — same
--- division of labour as V_STORE_CAMPAIGN_CURRENT's ROI/ROAS/CTR.
---
--- "Active" = STAGE NOT IN ('Rejected','Launch'). The IS NULL arm is deliberate:
--- `NULL NOT IN (...)` is NULL, so without it an idea with no STAGE would vanish
--- from the ranking silently rather than be ranked as the un-staged brief it is.
---
--- STAGE_RANK mirrors the IdeaStage vocabulary order in master_data/vocabularies.yaml.
--- It is duplicated here because SQL cannot read that file; if a stage is added
--- there, add it here too (an unmapped stage yields NULL, not a wrong number).
---
--- COGS_FIT is banded in SQL, not by the model, and TARGET_COGS_INR is nullable —
--- hence an explicit 'UNKNOWN' arm so a missing target can never read as 'INSIDE'.
+-- One row per ACTIVE brief; every machine-knowable number computed here so the LLM
+-- only reads it.
+--   IS NULL arm: `NULL NOT IN (...)` is NULL — without it a brief with no STAGE
+--     vanishes silently instead of ranking as un-staged.
+--   STAGE_RANK duplicates vocabularies.yaml's IdeaStage order (SQL can't read it).
+--     Add stages to both; unmapped yields NULL.
+--   COGS_FIT: explicit 'UNKNOWN' arm so a null target never reads 'INSIDE'.
+--   DAYS_IN_STAGE derived per read, never stored: DIM_IDEA is written only by
+--     idea_capture_triage's dataset_upsert, so a stored count would freeze there.
+--     STAGE_ENTERED_AT resets per stage change = "days stuck", not days since capture.
 CREATE OR REPLACE VIEW `gen-lang-client-0520145261.ctx_upside_master_data.V_IDEA_PRIORITY_INPUTS` AS
 WITH envelope AS (
   -- The cost envelope this company actually manufactures inside, collapsed to one
@@ -158,7 +138,7 @@ SELECT
   i.HYPOTHESIS,
   i.THESIS_FIT,
   i.TARGET_COGS_INR,
-  a.DAYS_IN_STAGE,
+  DATE_DIFF(CURRENT_DATE(), DATE(i.STAGE_ENTERED_AT), DAY) AS DAYS_IN_STAGE,
   CASE i.STAGE
     WHEN 'Capture'     THEN 1
     WHEN 'Triage'      THEN 2
@@ -175,32 +155,20 @@ SELECT
     ELSE 'INSIDE'
   END                                     AS COGS_FIT
 FROM `gen-lang-client-0520145261.ctx_upside_master_data.DIM_IDEA` i
-LEFT JOIN `gen-lang-client-0520145261.ctx_upside_master_data.V_IDEA_STAGE_AGE` a
-  ON a.IDEA_ID = i.IDEA_ID
 CROSS JOIN envelope e
 WHERE i.STAGE IS NULL OR i.STAGE NOT IN ('Rejected', 'Launch');
 
--- Market signal per category, from REALISED DEMAND — not competitor counts.
--- DIM_COMPETITOR_PRODUCT holds 16 hand-curated Pune rows across 6 categories
--- (sql/create_new_tables.sql), which is fine as the "is anyone else here" card
--- idea_capture_triage shows for ONE idea, but far too coarse to order ~38 ideas
--- against each other. So the primary signal is our own sales in the category the
--- idea targets, and the competitor count rides along as a labelled tiebreaker.
---
--- ORDER_STATE <> 'Cancelled' is the repo's established completed-orders filter
--- (see the Sales widgets in technical_assets/catalog/link_datasets.yaml); TOTAL
--- is the revenue column those widgets use (NET also exists).
---
--- GROWTH_PCT uses SAFE_DIVIDE, so a category with no prior-window sales yields
--- NULL rather than 0 — "we have no baseline" must not read as "flat".
---
--- CAVEAT on the competitor columns: DIM_COMPETITOR.CATEGORY is a free-text
--- competitor-brand category and is NOT guaranteed to use the same vocabulary as
--- DIM_CATEGORY.CATEGORY_NAME (idea_capture_triage never joins them — it has the
--- model match the names). The LEFT JOIN below normalises case/whitespace and
--- leaves the counts NULL when the two vocabularies don't line up. NULL here means
--- "not comparable", not "no competitors" — the process instruction says so, and
--- it is a tiebreaker only, so a NULL cannot move a brief up or down on its own.
+-- Per-category demand, compliance and channel facts, aggregated ONCE here instead of
+-- three times downstream. Also the `category_signal` key behind the Category Demand
+-- card — hence raw counts alongside the scored ones.
+--   Signal = REALISED DEMAND. Competitor columns are reviewer-only, NOT scored:
+--     16 hand-curated Pune rows over 6 categories, too coarse to rank ~38.
+--   ORDER_STATE <> 'Cancelled' = the repo's completed-orders filter; TOTAL = revenue
+--     (per the Sales widgets in link_datasets.yaml).
+--   GROWTH_PCT via SAFE_DIVIDE: no prior sales -> NULL, not 0. "No baseline" != flat.
+--   DIM_COMPETITOR.CATEGORY is free text, vocabulary need not match DIM_CATEGORY;
+--     the LEFT JOIN normalises case/space and leaves NULL on mismatch. NULL means
+--     "not comparable", NOT "no competitors".
 CREATE OR REPLACE VIEW `gen-lang-client-0520145261.ctx_upside_master_data.V_CATEGORY_MARKET_SIGNAL` AS
 WITH sku_category AS (
   SELECT p.SKU, c.CATEGORY_NAME
@@ -221,17 +189,11 @@ sales AS (
   GROUP BY 1
 ),
 forecast AS (
-  -- FORWARD-LOOKING ONLY, and that FORECAST_DATE filter is load-bearing:
-  -- IS_LATEST_FORECAST = TRUE does NOT isolate a single forecast run. Measured, it
-  -- spans 312 distinct FORECAST_DATEs across 16 stores, so `IS_LATEST_FORECAST AND
-  -- DAYS_AHEAD BETWEEN 1 AND 3` on its own summed 312 days of historical 1-3 day
-  -- predictions into one number — 18,413 units, against 10,490 units of ACTUAL
-  -- sales in the last 90 days. A "3-day forecast" bigger than a quarter of real
-  -- demand is not a signal, it is an artifact, and it sat one field away from
-  -- UNITS_90D where a reader would naturally compare the two.
-  -- Scoped to today onward, this is genuinely "units predicted for the next 1-3
-  -- days"; if the forecast table holds no forward rows it resolves to NULL, which
-  -- the candidates view renders as `none` and the scoring step ignores.
+  -- FORECAST_DATE >= CURRENT_DATE() is LOAD-BEARING. IS_LATEST_FORECAST does not
+  -- isolate one run — measured, 312 distinct FORECAST_DATEs over 16 stores. Without
+  -- the filter this summed 312 days of past 1-3 day predictions into 18,413 units,
+  -- against 10,490 ACTUAL 90-day sales, one field from UNITS_90D. No forward rows
+  -- -> NULL -> renders `none`.
   SELECT
     sc.CATEGORY_NAME,
     ROUND(SUM(f.PREDICTED_SALES_QUANTITY), 1) AS FORECAST_UNITS_NEXT
@@ -242,10 +204,44 @@ forecast AS (
     AND f.FORECAST_DATE >= CURRENT_DATE()
   GROUP BY 1
 ),
-active_skus AS (
-  SELECT sc.CATEGORY_NAME, COUNT(*) AS ACTIVE_SKUS_IN_CATEGORY
+-- Active-SKU count plus the three compliance presence counts, in ONE pass — the
+-- count is the denominator of all three ratios, so computing it separately would
+-- scan the same rows twice. Presence tests cast to STRING so they hold whatever
+-- the column type turns out to be; the cast costs nothing and cannot error.
+active_sku_facts AS (
+  SELECT
+    sc.CATEGORY_NAME,
+    COUNT(*)                                                                       AS ACTIVE_SKUS_IN_CATEGORY,
+    COUNTIF(TRIM(CAST(v.ORG_LABELLING_COMPLIANCE AS STRING)) NOT IN ('', 'false')) AS SKUS_WITH_LABEL_COMPLIANCE,
+    COUNTIF(TRIM(CAST(v.GS1_BARCODE AS STRING)) <> '')                             AS SKUS_WITH_BARCODE,
+    COUNTIF(al.SKU IS NOT NULL)                                                    AS SKUS_WITH_DECLARED_ALLERGENS
   FROM sku_category sc
   JOIN `gen-lang-client-0520145261.ctx_upside_master_data.V_PRODUCT_ENRICHED` v ON v.SKU = sc.SKU
+  LEFT JOIN (
+    SELECT DISTINCT SKU FROM `gen-lang-client-0520145261.ctx_upside_master_data.MAP_PRODUCT_ALLERGEN`
+  ) al ON al.SKU = sc.SKU
+  WHERE v.IS_ACTIVE
+  GROUP BY 1
+),
+-- Channels per category. SEPARATE GROUP BY on purpose: MAP_PRODUCT_CHANNEL fans a
+-- SKU to 14-15 rows and would multiply active_sku_facts' COUNTIFs. Sharing
+-- sku_category already kills the duplicate base join; merging further needs every
+-- aggregate rewritten as COUNT(DISTINCT IF(...)).
+-- APPLICABLE IS NOT A BOOLEAN — 794 rows measured: 'Suitable For' 490, NULL 229,
+-- 'Combo/Large Pack' 64, 'Small Pack' 11. It is PACK FORMAT. A truthy predicate
+-- once matched nothing, reporting 0 listed everywhere. "Listed" = row exists.
+-- INERT today: every stocked category maps 14-15 of 15 channels, so channel_fit
+-- cannot move the ranking. Kept per use-case row #17; matters once mapping is
+-- per-SKU.
+channel_coverage AS (
+  SELECT
+    sc.CATEGORY_NAME,
+    COUNT(DISTINCT IF(m.APPLICABLE IS NOT NULL, m.CHANNEL_ID, NULL)) AS CHANNELS_LISTED,
+    COUNT(DISTINCT ch.CHANNEL_ID)                                    AS CHANNELS_MAPPED
+  FROM sku_category sc
+  JOIN `gen-lang-client-0520145261.ctx_upside_master_data.V_PRODUCT_ENRICHED` v ON v.SKU = sc.SKU
+  LEFT JOIN `gen-lang-client-0520145261.ctx_upside_master_data.MAP_PRODUCT_CHANNEL` m ON m.SKU = sc.SKU
+  LEFT JOIN `gen-lang-client-0520145261.ctx_upside_master_data.DIM_CHANNEL` ch ON ch.CHANNEL_ID = m.CHANNEL_ID
   WHERE v.IS_ACTIVE
   GROUP BY 1
 ),
@@ -268,174 +264,181 @@ SELECT
   ROUND(SAFE_DIVIDE(s.UNITS_90D - s.UNITS_PRIOR_90D, s.UNITS_PRIOR_90D) * 100, 1) AS GROWTH_PCT,
   f.FORECAST_UNITS_NEXT,
   k.ACTIVE_SKUS_IN_CATEGORY,
+  k.SKUS_WITH_LABEL_COMPLIANCE,
+  k.SKUS_WITH_BARCODE,
+  k.SKUS_WITH_DECLARED_ALLERGENS,
+  n.CHANNELS_LISTED,
+  n.CHANNELS_MAPPED,
   x.ACTIVE_COMPETITOR_PRODUCTS,
   x.DISTINCT_COMPETITORS
+-- Every join stays a LEFT JOIN off DIM_CATEGORY: a category with no active SKUs
+-- (Health Bars, Dessert bites) is absent from both SKU CTEs and must arrive here
+-- as NULL, so the IFNULL(...,0) in V_PIPELINE_PRIORITY_CANDIDATES scores it a
+-- genuine 0. See ZERO IS NOT NEUTRAL there.
 FROM `gen-lang-client-0520145261.ctx_upside_master_data.DIM_CATEGORY` c
-LEFT JOIN sales       s ON s.CATEGORY_NAME = c.CATEGORY_NAME
-LEFT JOIN forecast    f ON f.CATEGORY_NAME = c.CATEGORY_NAME
-LEFT JOIN active_skus k ON k.CATEGORY_NAME = c.CATEGORY_NAME
-LEFT JOIN competitors x ON x.CATEGORY_KEY  = UPPER(TRIM(c.CATEGORY_NAME));
+LEFT JOIN sales            s ON s.CATEGORY_NAME = c.CATEGORY_NAME
+LEFT JOIN forecast         f ON f.CATEGORY_NAME = c.CATEGORY_NAME
+LEFT JOIN active_sku_facts k ON k.CATEGORY_NAME = c.CATEGORY_NAME
+LEFT JOIN channel_coverage n ON n.CATEGORY_NAME = c.CATEGORY_NAME
+LEFT JOIN competitors      x ON x.CATEGORY_KEY  = UPPER(TRIM(c.CATEGORY_NAME));
 
--- Channel fit per category: how many channels this category already sells on.
+-- The one un-truncated feed for the scoring step: four grains unioned behind a SRC
+-- discriminator. Each arm documents its DATA layout; the step's legend mirrors it —
+-- keep in sync.
 --
--- MAP_PRODUCT_CHANNEL.APPLICABLE IS NOT A BOOLEAN, despite the name. Measured
--- values across 794 rows: 'Suitable For' (490), NULL (229), 'Combo/Large Pack' (64),
--- 'Small Pack' (11) — it describes WHICH PACK FORMAT suits the channel, not whether
--- the SKU is listed. An earlier truthy predicate (IN ('TRUE','Y','1',…)) therefore
--- matched nothing and reported CHANNELS_LISTED = 0 for every category. "Listed" =
--- a mapping row exists with a pack format recorded, i.e. APPLICABLE IS NOT NULL.
+-- SHAPE IS FORCED BY TWO ENGINE LIMITS. `_compact_facts` previews any list fact
+-- over 4 rows down to 4 and only a step's own `fetch` escapes, so all ~38 briefs
+-- plus reference data must come through ONE fetch. STEP INPUT DATA caps at 9000
+-- chars, hence: 4 columns only (a column is a JSON key on every row, so width buys
+-- `"UNITS_90D":null` padding), fields packed into DATA, ingredient master as ONE
+-- cell (~2k vs ~23k), BRIEF positional not labelled (~1.1k), no HYPOTHESIS,
+-- CATEGORY scored not raw (~1.2k).
+-- Measured pre-SQL-scoring: BRIEF 4.2k + CATEGORY 1.6k + ENVELOPE 0.1k +
+-- INGREDIENT 2.0k = 8.4k, 600 spare; labelled was 9.2k and did NOT fit. Re-measure
+-- and record here; if over 9000, cut the ingredient cap before brief rows:
+--   SELECT LENGTH(TO_JSON_STRING(ARRAY_AGG(t))) FROM V_PIPELINE_PRIORITY_CANDIDATES t
 --
--- HEADS UP — this factor currently has NO discriminating power. Every category with
--- active SKUs maps to 14 or 15 of the 15 channels in DIM_CHANNEL, so channel_fit
--- scores near-identically for every brief and cannot change the ranking. It is kept
--- because use-case row #17 names it, and it will start discriminating once channel
--- mapping becomes SKU-specific rather than blanket. Until then, read it as
--- "confirmed distribution exists", not as a differentiator.
-CREATE OR REPLACE VIEW `gen-lang-client-0520145261.ctx_upside_master_data.V_CATEGORY_CHANNEL_COVERAGE` AS
-SELECT
-  c.CATEGORY_NAME,
-  COUNT(DISTINCT p.SKU)                                                   AS ACTIVE_SKUS,
-  COUNT(DISTINCT IF(m.APPLICABLE IS NOT NULL, m.CHANNEL_ID, NULL))        AS CHANNELS_LISTED,
-  COUNT(DISTINCT ch.CHANNEL_ID)                                           AS CHANNELS_MAPPED,
-  STRING_AGG(DISTINCT ch.CHANNEL_NAME, '|' ORDER BY ch.CHANNEL_NAME)      AS CHANNEL_NAMES
-FROM `gen-lang-client-0520145261.ctx_upside_master_data.DIM_PRODUCT` p
-JOIN `gen-lang-client-0520145261.ctx_upside_master_data.V_PRODUCT_ENRICHED` v ON v.SKU = p.SKU
-JOIN `gen-lang-client-0520145261.ctx_upside_master_data.DIM_CATEGORY` c ON c.CATEGORY_ID = p.CATEGORY_ID
-LEFT JOIN `gen-lang-client-0520145261.ctx_upside_master_data.MAP_PRODUCT_CHANNEL` m ON m.SKU = p.SKU
-LEFT JOIN `gen-lang-client-0520145261.ctx_upside_master_data.DIM_CHANNEL` ch ON ch.CHANNEL_ID = m.CHANNEL_ID
-WHERE v.IS_ACTIVE
-GROUP BY 1;
-
--- Compliance readiness per category.
---
--- READ THIS BEFORE TRUSTING THE NUMBER: this is a PROXY for "how well-trodden the
--- compliance path is for this category", NOT the readiness of any individual idea.
--- An idea has no label, no barcode and no allergen declaration yet — there is
--- nothing idea-level to measure. Use-case row #17 marks this factor "Known
--- unknown"; that is exactly what this view is. Making it idea-level needs
--- TARGET_CATEGORY on DIM_IDEA plus per-idea label/allergen data that doesn't exist.
---
--- Presence tests cast to STRING so they hold whatever the underlying column type
--- turns out to be (ORG_LABELLING_COMPLIANCE is declared `string` in
--- ontology/entities.yaml, but the cast costs nothing and cannot error).
-CREATE OR REPLACE VIEW `gen-lang-client-0520145261.ctx_upside_master_data.V_CATEGORY_COMPLIANCE_READINESS` AS
-SELECT
-  c.CATEGORY_NAME,
-  COUNT(*)                                                                     AS ACTIVE_SKUS,
-  COUNTIF(TRIM(CAST(v.ORG_LABELLING_COMPLIANCE AS STRING)) NOT IN ('', 'false')) AS SKUS_WITH_LABEL_COMPLIANCE,
-  COUNTIF(TRIM(CAST(v.GS1_BARCODE AS STRING)) <> '')                           AS SKUS_WITH_BARCODE,
-  COUNTIF(al.SKU IS NOT NULL)                                                  AS SKUS_WITH_DECLARED_ALLERGENS
-FROM `gen-lang-client-0520145261.ctx_upside_master_data.DIM_PRODUCT` p
-JOIN `gen-lang-client-0520145261.ctx_upside_master_data.V_PRODUCT_ENRICHED` v ON v.SKU = p.SKU
-JOIN `gen-lang-client-0520145261.ctx_upside_master_data.DIM_CATEGORY` c ON c.CATEGORY_ID = p.CATEGORY_ID
-LEFT JOIN (
-  SELECT DISTINCT SKU FROM `gen-lang-client-0520145261.ctx_upside_master_data.MAP_PRODUCT_ALLERGEN`
-) al ON al.SKU = p.SKU
-WHERE v.IS_ACTIVE
-GROUP BY 1;
-
--- The single un-truncated feed for innovation_pipeline_prioritisation's scoring
--- step. Four grains unioned behind a SRC discriminator, mirroring how
--- V_TRIAGE_SIMILARITY_CANDIDATES gets two grains through one step-level `fetch`.
---
--- WHY THIS SHAPE — the two engine limits it is built around:
---  1. `_compact_facts` (event_agent.py) previews ANY list fact longer than 4 rows
---     down to 4. Only a step's OWN `fetch` lands un-previewed, in STEP INPUT DATA.
---     So every one of the ~38 briefs and all of its reference data must arrive
---     through ONE fetch, or the scoring step sees 4 briefs and invents the rest.
---  2. STEP INPUT DATA is hard-capped at 9000 chars. That cap is why:
---     - there are only FOUR columns. Every column is serialised as a JSON key on
---       every row, so a wide table spends its budget on `"UNITS_90D":null` padding
---       for the 38 rows that aren't category rows. Per-grain fields are packed
---       into the DATA string instead.
---     - the 153-row ingredient master is ONE row with the names in a single cell.
---       As 153 rows of a 4-column table it cost ~23k of mostly-null padding; as one
---       packed cell it costs ~2k.
---     - BRIEF's DATA is POSITIONAL (`stage|days|cogs|fit`), not labelled. The four
---       `stg=`/`days=`/`cogs=`/`fit=` labels cost ~22 chars on every brief row —
---       ~0.8k at 38 briefs, which is the difference between fitting and not. The
---       legend lives in the process step's instruction; keep the two in sync.
---     - HYPOTHESIS is NOT here (it is in V_IDEA_PRIORITY_INPUTS for the reviewer
---       card). It is long free text; carrying it for 38 briefs blows the budget,
---       so ingredient derivation works from NAME.
---   Measured, serialised the way event_agent dumps it (38 briefs @32-char names,
---   153 ingredients @11 chars): BRIEF ~4.2k + CATEGORY ~1.6k + ENVELOPE ~0.1k +
---   INGREDIENT ~2.0k = ~8.4k, ~600 chars of headroom. Re-check with:
---     SELECT LENGTH(TO_JSON_STRING(ARRAY_AGG(t))) FROM V_PIPELINE_PRIORITY_CANDIDATES t
---   The labelled form measured 9.2k — i.e. it did NOT fit. If briefs or ingredient
---   names grow enough to push this back over 9000, cut the ingredient cap below
---   before touching the brief rows.
---
--- GRACEFUL DEGRADATION, two mechanisms, because an overflow here fails SILENTLY:
---  1. The SRC values sort BRIEF < CATEGORY < ENVELOPE < INGREDIENT and the step
---     fetches with `order_by: SRC, order_dir: asc`. The cap truncates the TAIL, so
---     an overflow costs ingredient scoring first and the briefs last. Keep that
---     ordering if you add a grain.
---  2. The ingredient cell states its own item count AT THE HEAD (`count=153;`).
---     A cut anywhere in the tail therefore still leaves the model able to see that
---     it holds fewer names than the count claims. The process instruction tells it
---     to score unmatched ingredients as UNKNOWN, not as net-new, whenever the two
---     disagree — so a truncated master can never turn into a false "needs net-new
---     sourcing" claim. This is why the count is at the head and not appended: a
---     trailing marker is itself in the tail, and gets cut with everything else.
---
--- DATA layout, decoded in the process step's instruction — keep the two in sync:
---   BRIEF      POSITIONAL, pipe-delimited: stage|days_in_stage|target_cogs|cogs_fit
---   CATEGORY   labelled (only 6 rows, and this is the scoring evidence a reviewer
---              audits): units90 / prior90 / growth_pct / fcast / skus / chan /
---              chan_names / label_ok / barcode / allergen / comp_products / comp_brands
---   ENVELOPE   cogs_min / cogs_max
---   INGREDIENT count=<n>; names: <comma-separated, lowercased>
---
--- NOTE the empty-portfolio edge case: `unknown` appears in BRIEF's DATA wherever
--- DIM_IDEA has no stage date or no target COGS. The instruction scores those
--- factors at the neutral midpoint rather than 0 — a missing number must not read
--- as a bad number.
+-- Overflow is SILENT, so degradation is ordered: SRC sorts BRIEF < CATEGORY <
+-- ENVELOPE < INGREDIENT and the step fetches `order_by: SRC asc`, so the cap eats
+-- ingredients first, briefs last. Keep that ordering if you add a grain.
 CREATE OR REPLACE VIEW `gen-lang-client-0520145261.ctx_upside_master_data.V_PIPELINE_PRIORITY_CANDIDATES` AS
--- BRIEF rows: positional DATA. Order is stage|days|cogs|fit and must not be
--- reordered without updating the legend in the process step's instruction.
+WITH
+-- SCORING LADDERS — 5 of 6 factors scored here, not in the prompt, so they cannot
+-- drift run-to-run. `ingredient_availability` stays with the model (ingredients
+-- derived from a NAME, matched by meaning). The total cannot collapse here either:
+-- a brief's CATEGORY is a model judgement while there is no Idea->Category edge.
+-- Hence two weighted subtotals:
+--   priority_score = BRIEF_SUBTOTAL (30) + CAT_SUBTOTAL (50) + ingredient x 4 (20)
+-- Cut-points mirror metadata.scoring_ladders / .scoring_weights in
+-- processes/innovation_pipeline_prioritisation.yaml. Change all three together.
+--
+-- ZERO IS NOT NEUTRAL. 2.5 = input literally missing (no target COGS, no stage
+-- date). No active SKUs scores a genuine 0 — measured "we don't sell here", not
+-- absent data — hence IFNULL(...,0), never the midpoint, on every SAFE_DIVIDE
+-- below. Do not "fix" this.
+
+-- Per-category factor scores (0-5 each) and their weighted subtotal (max 50).
+category_factor_scores AS (
+  SELECT
+    m.CATEGORY_NAME,
+    m.UNITS_90D,
+    m.GROWTH_PCT,
+    -- market_signal, max 5: volume (0-3) + growth (0-2). Absolute thresholds, not
+    -- percentiles — with 6 categories a percentile swings on one moving. Calibrated
+    -- against ~10,500 units sold in 90d. Competitors excluded: the old prompt made
+    -- them a tiebreaker that "must not move a score", too vague to make
+    -- deterministic. They stay on the Category Demand card.
+    (CASE
+       WHEN IFNULL(m.UNITS_90D, 0) <= 0 THEN 0
+       WHEN m.UNITS_90D <   500        THEN 1
+       WHEN m.UNITS_90D <  2000        THEN 2
+       ELSE                                 3
+     END
+     + CASE
+         WHEN m.GROWTH_PCT IS NULL OR m.GROWTH_PCT < 0 THEN 0   -- no_baseline or shrinking
+         WHEN m.GROWTH_PCT < 25                        THEN 1
+         ELSE                                               2
+       END)                                                   AS MARKET_SIGNAL,
+    -- compliance_readiness, max 5: mean of the three presence ratios. They share
+    -- ACTIVE_SKUS as denominator, so numerators over 3 x ACTIVE_SKUS IS that mean.
+    -- A PROXY for how well-trodden a CATEGORY's compliance path is, never an
+    -- individual idea's readiness — an idea has no label or barcode yet.
+    CAST(ROUND(5 * IFNULL(SAFE_DIVIDE(
+           m.SKUS_WITH_LABEL_COMPLIANCE + m.SKUS_WITH_BARCODE + m.SKUS_WITH_DECLARED_ALLERGENS,
+           3 * m.ACTIVE_SKUS_IN_CATEGORY), 0)) AS INT64)       AS COMPLIANCE_READINESS,
+    -- channel_fit, max 5: listed / mapped. Near-inert today — see channel_coverage
+    -- in V_CATEGORY_MARKET_SIGNAL.
+    CAST(ROUND(5 * IFNULL(SAFE_DIVIDE(m.CHANNELS_LISTED, m.CHANNELS_MAPPED), 0)) AS INT64)
+                                                               AS CHANNEL_FIT
+  -- Every input now arrives pre-aggregated from one view, so the SKU-level joins
+  -- run once instead of three times.
+  FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_CATEGORY_MARKET_SIGNAL` m
+),
+category_scores AS (
+  -- Separate level: BigQuery cannot reference a SELECT alias in the same list.
+  SELECT
+    s.*,
+    s.MARKET_SIGNAL * 5 + s.COMPLIANCE_READINESS * 3 + s.CHANNEL_FIT * 2 AS CAT_SUBTOTAL
+  FROM category_factor_scores s
+),
+
+-- Per-brief factor scores and their weighted subtotal (max 30). Scored here, not
+-- in V_IDEA_PRIORITY_INPUTS, so that view stays the raw-input reviewer feed its
+-- dataset link and Raw Scoring Inputs card expect.
+brief_factor_scores AS (
+  SELECT
+    b.IDEA_ID,
+    b.NAME,
+    b.STAGE,
+    b.DAYS_IN_STAGE,
+    -- cogs_vs_target: the only ladder already exact in the prompt. BELOW is 4, not
+    -- 5 — cheaper than anything we make today, so margin looks good but unproven.
+    CASE b.COGS_FIT
+      WHEN 'INSIDE' THEN 5.0
+      WHEN 'BELOW'  THEN 4.0
+      WHEN 'ABOVE'  THEN 2.0
+      ELSE               2.5        -- 'UNKNOWN' -> neutral midpoint, flagged below
+    END                                                        AS COGS_SCORE,
+    -- time_in_stage: LONGER SCORES HIGHER — an aging brief needs a decision sooner.
+    CASE
+      WHEN b.DAYS_IN_STAGE IS NULL THEN 2.5   -- no stage date -> neutral, flagged below
+      WHEN b.DAYS_IN_STAGE <  15   THEN 0.0
+      WHEN b.DAYS_IN_STAGE <= 30   THEN 1.0
+      WHEN b.DAYS_IN_STAGE <= 45   THEN 2.0
+      WHEN b.DAYS_IN_STAGE <= 60   THEN 3.0
+      WHEN b.DAYS_IN_STAGE <  90   THEN 4.0
+      ELSE                              5.0
+    END                                                        AS TIME_SCORE,
+    -- The `unknowns` list, computed here rather than inferred. 'none' not '' so a
+    -- blank positional field can never be misread as a missing one.
+    IFNULL(NULLIF(ARRAY_TO_STRING(ARRAY_CONCAT(
+      IF(b.COGS_FIT = 'UNKNOWN',      ['cogs_vs_target'], []),
+      IF(b.DAYS_IN_STAGE IS NULL,     ['time_in_stage'],  [])
+    ), ','), ''), 'none')                                      AS UNKNOWNS
+  FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_IDEA_PRIORITY_INPUTS` b
+),
+brief_scores AS (
+  SELECT
+    s.*,
+    s.COGS_SCORE * 4 + s.TIME_SCORE * 2 AS BRIEF_SUBTOTAL   -- weights 4 and 2 -> max 30
+  FROM brief_factor_scores s
+)
+
+-- BRIEF rows: positional DATA, stage|days|cogs_s|time_s|brief_sub|unk. Do not
+-- reorder without updating the legend in the process step's instruction.
+-- FORMAT('%g') prints a whole score as "5" not "5.0" while keeping the 2.5 neutral.
 SELECT
   'BRIEF'    AS SRC,
   b.IDEA_ID  AS ID,
   b.NAME     AS NAME,
   CONCAT(
-    IFNULL(b.STAGE, 'unknown'),                            '|',
-    IFNULL(CAST(b.DAYS_IN_STAGE AS STRING), 'unknown'),     '|',
-    IFNULL(CAST(b.TARGET_COGS_INR AS STRING), 'unknown'),   '|',
-    b.COGS_FIT
+    IFNULL(b.STAGE, 'unknown'),                         '|',
+    IFNULL(CAST(b.DAYS_IN_STAGE AS STRING), 'unknown'),  '|',
+    FORMAT('%g', b.COGS_SCORE),                          '|',
+    FORMAT('%g', b.TIME_SCORE),                          '|',
+    FORMAT('%g', b.BRIEF_SUBTOTAL),                      '|',
+    b.UNKNOWNS
   )          AS DATA
-FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_IDEA_PRIORITY_INPUTS` b
+FROM brief_scores b
 
 UNION ALL
+-- CATEGORY rows: the three factors ALREADY SCORED, plus their subtotal. units90 /
+-- growth_pct exist only so the model can cite a figure in `reason`. The raw evidence
+-- (prior90, forecast, SKU/channel/label counts, competitors) is not lost — it is on
+-- the Category Demand card via `category_signal`; duplicating it here cost ~1.2k.
 SELECT
   'CATEGORY',
   CAST(NULL AS STRING),
-  m.CATEGORY_NAME,
+  s.CATEGORY_NAME,
   CONCAT(
-    'units90=',        IFNULL(CAST(m.UNITS_90D AS STRING), 'none'),
-    '; prior90=',      IFNULL(CAST(m.UNITS_PRIOR_90D AS STRING), 'none'),
-    '; growth_pct=',   IFNULL(CAST(m.GROWTH_PCT AS STRING), 'no_baseline'),
-    '; fcast=',        IFNULL(CAST(m.FORECAST_UNITS_NEXT AS STRING), 'none'),
-    '; skus=',         IFNULL(CAST(m.ACTIVE_SKUS_IN_CATEGORY AS STRING), '0'),
-    -- chan is `listed/mapped` so the model reads a ratio it can score directly,
-    -- instead of inferring the denominator by eyeballing the other CATEGORY rows.
-    '; chan=',         IFNULL(CAST(v.CHANNELS_LISTED AS STRING), '0'),
-    '/',               IFNULL(CAST(v.CHANNELS_MAPPED AS STRING), '0'),
-    '; chan_names=',   IFNULL(v.CHANNEL_NAMES, 'none'),
-    '; label_ok=',     IFNULL(CAST(r.SKUS_WITH_LABEL_COMPLIANCE AS STRING), '0'),
-    '/',               IFNULL(CAST(r.ACTIVE_SKUS AS STRING), '0'),
-    '; barcode=',      IFNULL(CAST(r.SKUS_WITH_BARCODE AS STRING), '0'),
-    '; allergen=',     IFNULL(CAST(r.SKUS_WITH_DECLARED_ALLERGENS AS STRING), '0'),
-    -- 'not_comparable' (not '0') when the competitor-category vocabulary doesn't
-    -- line up with DIM_CATEGORY — see the CAVEAT on V_CATEGORY_MARKET_SIGNAL.
-    '; comp_products=', IFNULL(CAST(m.ACTIVE_COMPETITOR_PRODUCTS AS STRING), 'not_comparable'),
-    '; comp_brands=',   IFNULL(CAST(m.DISTINCT_COMPETITORS AS STRING), 'not_comparable')
+    'ms=',            CAST(s.MARKET_SIGNAL AS STRING),
+    '; cr=',          CAST(s.COMPLIANCE_READINESS AS STRING),
+    '; cf=',          CAST(s.CHANNEL_FIT AS STRING),
+    '; cat_sub=',     CAST(s.CAT_SUBTOTAL AS STRING),
+    '; units90=',     IFNULL(CAST(s.UNITS_90D AS STRING), 'none'),
+    '; growth_pct=',  IFNULL(CAST(s.GROWTH_PCT AS STRING), 'no_baseline')
   )
-FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_CATEGORY_MARKET_SIGNAL` m
-LEFT JOIN `gen-lang-client-0520145261.ctx_upside_master_data.V_CATEGORY_CHANNEL_COVERAGE` v
-  ON v.CATEGORY_NAME = m.CATEGORY_NAME
-LEFT JOIN `gen-lang-client-0520145261.ctx_upside_master_data.V_CATEGORY_COMPLIANCE_READINESS` r
-  ON r.CATEGORY_NAME = m.CATEGORY_NAME
+FROM category_scores s
 
 UNION ALL
 -- One row: the manufacturing cost envelope, which is identical for every brief.
@@ -451,41 +454,23 @@ SELECT
 FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_PRODUCT_LINE_CAPABILITY`
 
 UNION ALL
--- One row: the whole ingredient master packed into a single cell. Presence means
--- "we already buy this"; absence means net-new sourcing. Carries NO stock
--- quantities — see the DIM_INGREDIENT note in link_datasets.yaml.
+-- Whole ingredient master in one cell. Present = already sourced, absent = net-new.
+-- NO stock quantities.
 --
--- COMPLETENESS IS SELF-DECLARED, in two markers, because THE MODEL CANNOT COUNT.
--- This cell is last in SRC order and so the first thing the 9000-char STEP INPUT
--- DATA cap eats into, and SUBSTR below can also cut it — the reader has to be able
--- to tell. `count=<n>` alone did NOT work: asking a model to count 153 comma-
--- separated items is asking for the one thing it is worst at, and it is genuinely
--- ambiguous here because the names THEMSELVES contain commas ("a non-caloric
--- sweetener blend (erythritol, stevia, allulose)" reads as three items). Observed
--- result: every run hedged to "master appears partial" on a master that was fully
--- delivered, pinning ingredient_availability — a weight-4 factor, 20% of the score —
--- at the neutral 2.5 on every brief, which then escalated the whole ranking.
--- So the two truncation modes are each flagged deterministically instead:
---   `list=complete|partial` — SQL knows whether ITS OWN SUBSTR cut the names.
---   `; end_of_list` terminator — present only if the tail survived, so its ABSENCE
---     is how the reader detects the engine's 9000-char cap eating the end. SQL
---     cannot see that cap, hence a sentinel rather than another computed flag.
--- The instruction reads these two markers and never counts. Keep both, and keep the
--- terminator last — a marker in the middle would survive the very cut it must catch.
+-- COMPLETENESS IS SELF-DECLARED BECAUSE THE MODEL CANNOT COUNT. `count=<n>` alone
+-- failed: names contain commas ("a non-caloric sweetener blend (erythritol, stevia,
+-- allulose)" reads as three), so every run hedged to "partial" on a complete master,
+-- pinning ingredient_availability (weight 4) at 2.5 and escalating the ranking. Two
+-- markers flag the two truncation modes: `list=complete|partial` (SQL sees its own
+-- SUBSTR cut) and trailing `end_of_list` (survives only if the tail did, so its
+-- ABSENCE reveals the engine's 9000 cap, invisible to SQL). Terminator stays LAST —
+-- mid-string it would survive the cut it must catch.
 --
--- SUBSTR is 4000, not 2000: measured, the 153 names pack to 3,995 chars (avg name
--- 24 chars, max 127 — they are descriptive phrases like "a non-caloric sweetener
--- blend (erythritol, stevia, allulose)", not tidy single words). At 2000 only ~76
--- of 153 survived, which silently halved a weight-4 factor's evidence.
---
--- KNOWN LIMIT: 4000 fits comfortably today only because DIM_IDEA holds a handful of
--- active briefs. Once the real ~35-40-brief pipeline is loaded, brief rows will need
--- ~5k and this cell will start truncating again — the count guard will correctly
--- turn ingredient_availability neutral rather than produce a wrong answer, but the
--- factor goes quiet. The durable fix is cleaning DIM_INGREDIENT itself: the master
--- carries near-duplicate descriptive variants (three separate erythritol/stevia/
--- allulose blend spellings), and normalising those would cut the packed size enough
--- to fit alongside a full pipeline.
+-- SUBSTR 4000 not 2000: 153 names pack to 3,995 chars (avg 24, max 127); at 2000
+-- only ~76 survived, halving a weight-4 factor's evidence. KNOWN LIMIT — fits only
+-- while DIM_IDEA holds few briefs; at ~35-40 this truncates again and the factor
+-- goes quiet (honest, but quiet). Durable fix: normalise DIM_INGREDIENT's
+-- near-duplicate spellings (three erythritol/stevia/allulose blends).
 SELECT
   'INGREDIENT',
   CAST(NULL AS STRING),

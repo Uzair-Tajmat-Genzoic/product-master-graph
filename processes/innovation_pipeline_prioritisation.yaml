@@ -3,37 +3,33 @@ version: 1
 processes:
   # Innovation Pipeline Prioritisation — rank the STANDING pipeline, not one idea.
   #
-  # idea_capture_triage evaluates a single idea on entry. Nothing ranked the ideas
-  # already in DIM_IDEA, so the ~35-40 active briefs had no comparable priority
-  # (DP1: pipeline lives in a Google Sheet, priority is founder instinct). This
-  # process scores every active brief on the six factors from use-case row #17,
-  # then buys external web research only for the top 3.
+  # idea_capture_triage evaluates a single idea on entry; nothing ranked the ~35-40
+  # briefs already in DIM_IDEA (DP1: the pipeline lives in a Google Sheet, priority
+  # is founder instinct). This scores every active brief on the six factors from
+  # use-case row #17, then buys web research only for the top 3 — internal signal is
+  # cheap and covers everything, research costs 90s per idea so it goes only where it
+  # changes a decision.
   #
-  # Two-phase on purpose: internal signal is cheap and covers everything; web
-  # research costs 90s per idea, so it goes only where it changes a decision.
-  #
-  # ponytail: gaps that need engine or data changes this YAML can't make alone —
-  # not silently dropped, just not fakeable here:
-  # - `priority_score` is arithmetic done by the model, so it can drift slightly
-  #   run-to-run. A deterministic total needs BOTH an `add`/`sum_cols` op in
-  #   context_collector._compute_where AND a way to post-process agent-produced
-  #   facts (today `post:` only runs on context_package keys), or the score has to
-  #   be persisted to SQL. The per-factor scores are emitted alongside the total so
-  #   a reviewer can always re-add them by hand.
-  # - The web-research fan-out is HARDCODED as three steps. A step gets exactly one
-  #   `skill:` call, and `type: foreach` is a human gate per row (it pauses on every
-  #   item), so there is no way to loop a skill over N ideas silently. A real N-wide
-  #   fan-out needs an agent-loop step type in the engine. Changing shortlist_size
-  #   below means adding/removing research steps to match.
-  # - compliance_readiness and channel_fit are CATEGORY-level proxies, not
-  #   idea-level facts — an idea has no label, barcode or channel listing yet.
-  #   Idea-level needs TARGET_CATEGORY on DIM_IDEA (written by idea_capture_triage
-  #   on approval) plus per-idea label/allergen data. Row #17 calls this factor
-  #   "Known unknown"; the views say so in their header comments too.
-  # - No run-over-run movement ("moved up 4 places since last week") — nothing
-  #   persists a previous ranking. Needs a table plus a write step.
-  # - Row-level review is impossible: every `decision` step in this codebase yields
-  #   ONE enum for the whole batch, never per-row edits.
+  # ponytail: gaps needing engine or data changes this YAML can't make alone —
+  # - `priority_score` is MOSTLY deterministic. Five of six factors are scored,
+  #   weighted and part-summed in SQL (V_PIPELINE_PRIORITY_CANDIDATES), so 80 of the
+  #   100 points cannot drift; the model scores `ingredient_availability` and does one
+  #   multiply and one add. The residue is not removable here: the total depends on
+  #   WHICH CATEGORY a brief targets, a model judgement while there is no
+  #   Idea->Category edge. Closing it needs that edge, or an `add`/`sum_cols` op in
+  #   context_collector._compute_where PLUS post-processing of agent-produced facts
+  #   (`post:` runs only on context_package keys today).
+  # - The web-research fan-out is HARDCODED as three steps: a step gets one `skill:`
+  #   call and `foreach` pauses for a human on every row, so a silent N-wide loop
+  #   needs a new engine step type. Changing shortlist_size means adding/removing
+  #   research steps by hand.
+  # - compliance_readiness and channel_fit are CATEGORY-level proxies — an idea has
+  #   no label, barcode or channel listing yet. Idea-level needs TARGET_CATEGORY on
+  #   DIM_IDEA (written by idea_capture_triage on approval) plus per-idea label data.
+  # - No run-over-run movement ("up 4 places since last week") — nothing persists a
+  #   previous ranking. Needs a table plus a write step.
+  # - Row-level review is impossible: a `decision` step yields ONE enum for the whole
+  #   batch, never per-row edits.
   - id: innovation_pipeline_prioritisation
     name: Innovation Pipeline Prioritisation
     description: >
@@ -47,6 +43,9 @@ processes:
     domain: Innovation
     owner: npd_team
     definition_type: text
+
+    applies_to:
+      - entity: Category
 
     triggers:
       # NOTE: the `event` trigger below is INERT on the webhook path, and that is fine.
@@ -68,32 +67,26 @@ processes:
       - { type: event, event_type: innovation_pipeline_prioritisation }
       - { type: manual, allowed_roles: [npd_team, Admin] }
 
-    # THE EVENT MUST CARRY AT LEAST ONE ATTRIBUTE. This is a full sweep that needs no
-    # business input, but orchestrator.validate_event rejects any event with neither
-    # entity_refs NOR attributes — at stage `received`, BEFORE this file is even loaded.
-    # A sweep resolves no entity from the event, so an attribute is the only way through
-    # that gate, and build_business_event deliberately SKIPS the injected `eventType`
-    # key, so it does not count. Getting this wrong fails in ~9ms with "event must
-    # reference at least one entity or carry attributes", and the UI then shows its
-    # generic "the agent couldn't complete context collection or reach a recommendation"
-    # copy — which is misleading, because nothing ran. That is exactly how this process
-    # failed its first two runs, on a body of `{}`.
+    # THE EVENT MUST CARRY AT LEAST ONE ATTRIBUTE. orchestrator.validate_event rejects
+    # an event with neither entity_refs NOR attributes at stage `received`, BEFORE this
+    # file loads. A sweep resolves no entity, so an attribute is the only way through,
+    # and the injected `eventType` key is deliberately skipped and does not count. Get
+    # this wrong and it fails in ~9ms, but the UI shows its generic "couldn't complete
+    # context collection" copy — misleading, since nothing ran. This process failed its
+    # first two runs exactly that way, on a body of `{}`.
     #
-    # WHAT SATISFIES THE GATE depends on the TriggerDefinition, not on this file:
-    #  - trigger has NO field_mapping  -> the raw body IS the attributes, so `{}` fails.
-    #  - trigger HAS a field_mapping   -> extract_fields emits ONE KEY PER MAPPING ENTRY
-    #    even when the JSONPath misses (value null), so attributes are never empty and
-    #    even `{}` passes. The live webhook maps `run_reason`, so it is in this second
-    #    case. Note a field_mapping is a WHITELIST: any body key that is not mapped is
-    #    silently dropped, so mapping `run_reason` alone is what keeps this working.
+    # WHAT SATISFIES THE GATE depends on the TriggerDefinition, not this file: with NO
+    # field_mapping the raw body IS the attributes, so `{}` fails; WITH one,
+    # extract_fields emits a key per mapping entry even when the JSONPath misses, so
+    # even `{}` passes. The live webhook maps `run_reason` — and a field_mapping is a
+    # WHITELIST, so that single mapping is what keeps this working.
     inputs:
       - { name: run_reason, type: string, required: false,
-          description: "Short free text on why this cycle was run (e.g. \"weekly sweep\",
-            \"re-run after COGS fix\"). No step reads it — it is provenance on the event
-            record, and it is the single mapped field keeping attributes non-empty.
-            `required: false` is honest: `process.inputs` is documentation projected onto
-            the graph node, never parsed by the engine, so it constrains nothing at
-            runtime. The webhook trigger's field_mapping is the real contract." }
+          description: "Short free text on why this cycle was run (e.g. \"weekly sweep\").
+            No step reads it — it is provenance, and the single mapped field keeping
+            attributes non-empty. `required: false` is honest: `process.inputs` is
+            documentation projected onto the graph node, never parsed by the engine. The
+            webhook trigger's field_mapping is the real contract." }
 
     # NOTE: there is deliberately NO `final_ranking` output. It used to exist and was
     # ALWAYS null — see the comment on finalise_ranking below. The top-3 external view
@@ -156,145 +149,108 @@ processes:
           - shortlist_3_score
           - shortlist_3_band
         instruction: >
-          `priority_candidates` is the COMPLETE, un-truncated input set. Read the
-          `SRC` column to know what each row is, and decode the abbreviated `DATA`
-          string with this legend:
-          `SRC='BRIEF'` — one active idea. `ID` is its IDEA_ID, `NAME` its name.
-          DATA is POSITIONAL, pipe-delimited, with exactly four fields in this order:
-          `stage|days_in_stage|target_cogs_inr|cogs_fit`. So `Feasibility|134|142.5|INSIDE`
-          means stage Feasibility, 134 days in that stage, a target COGS of ₹142.5, and
-          that target sitting INSIDE the manufacturable envelope. `cogs_fit` is one of
-          `INSIDE`/`BELOW`/`ABOVE`/`UNKNOWN`; `days_in_stage` or `target_cogs_inr` may be
-          the literal `unknown`.
-          `SRC='CATEGORY'` — one product category, `NAME` is the category name.
-          DATA: `units90`/`prior90`=units sold in the last 90 days and the 90 before
-          that, `growth_pct`=percent change (`no_baseline` when there were no prior
-          sales), `fcast`=forecast units next 1-3 days, `skus`=active SKUs,
-          `chan`=channels this category is listed on out of the channels mapped to it,
-          as `listed/mapped`, `chan_names`=which ones,
-          `label_ok`/`barcode`/`allergen`=how many of that category's active SKUs
-          carry label compliance, a barcode, and declared allergens,
-          `comp_products`/`comp_brands`=active competitor products and brands.
-          `SRC='ENVELOPE'` — one row: `cogs_min`/`cogs_max`, the COGS range this
-          company actually manufactures inside.
-          `SRC='INGREDIENT'` — one row whose DATA is `count=<n>; list=<complete|partial>;
-          names: <comma-separated list>; end_of_list`, the ingredients the company
-          already sources. Presence means "we already buy this"; absence means net-new
-          sourcing would be required. It carries NO stock quantities — never state or
-          imply that an ingredient is in or out of stock, only that it is already
-          sourced or would be net-new.
-          COMPLETENESS CHECK, do this before scoring any ingredient factor. DO NOT
-          COUNT THE NAMES — the count is unreliable to eyeball and the names themselves
-          contain commas ("a non-caloric sweetener blend (erythritol, stevia,
-          allulose)" is ONE ingredient, not three), so counting gives a wrong answer.
-          Read the two markers instead:
-          the master is WHOLE when `list=complete` AND the row ends with the literal
-          `end_of_list`. In that case score `ingredient_availability` normally — an
-          ingredient you cannot match IS genuinely net-new, and you must NOT call the
-          master partial or hedge to the neutral score.
-          The master is CUT only when `list=partial`, or when the `end_of_list`
-          terminator is missing (the row was truncated before its end). ONLY THEN:
-          treat any ingredient you cannot match as UNKNOWN rather than net-new, score
-          those briefs' `ingredient_availability` at the neutral 2.5, add
-          `ingredient_availability` to their `unknowns`, and say the master was partial
-          in the `### Data Gaps` card. Never report net-new sourcing off a cut list.
+          `priority_candidates` is the COMPLETE, un-truncated input set. Five of the
+          six factors are ALREADY SCORED in SQL and are correct per row: never
+          recompute them or re-derive them from raw numbers. You score ONE factor and
+          add three numbers.
 
-          For EVERY `SRC='BRIEF'` row, in order:
-          (1) Infer its target category by matching the brief's name against the
-          `SRC='CATEGORY'` names. Choose ONLY from those names — never invent a
-          category. If nothing matches, use the closest one and say so in `reason`.
-          (2) Derive the 5-12 ingredients the product would plausibly need — be
-          concrete ("whey protein isolate", "dates", "cocoa powder"), not categories
-          — and match each against the `SRC='INGREDIENT'` list by meaning rather
-          than exact string ("Almonds" matches "almond"; "Fresh cream" matches
-          "cream"), only claiming a match when a specific listed ingredient supports
-          it.
-          (3) Score each of these six factors from 0 to 5 (0 = worst, 5 = best):
-          `market_signal` — the inferred category's `units90` and `growth_pct`. High
-          volume with positive growth scores 5; no sales and `no_baseline` scores 0.
-          Treat `comp_products`/`comp_brands` as a TIEBREAKER ONLY, never as the
-          main driver: it comes from 16 hand-curated competitor rows, and a value of
-          `not_comparable` means the competitor category vocabulary doesn't line up
-          with ours — it does NOT mean "no competitors" and must not move a score.
-          `compliance_readiness` — the `label_ok`/`barcode`/`allergen` ratios for the
-          inferred category: a category where nearly every SKU is labelled, barcoded
-          and allergen-declared is a well-trodden compliance path (5); one where few
-          are is not (0). This is a CATEGORY-level proxy — an idea has no label yet —
-          so never describe it as this idea's own compliance status.
-          `cogs_vs_target` — `fit`. INSIDE scores 5; BELOW scores 4 (cheaper than
-          anything we make today, so the margin looks good but the target is
-          unproven); ABOVE scores 2; UNKNOWN is unscorable — see the rule below.
-          `ingredient_availability` — the share of derived ingredients matched in the
-          already-sourced list: 5 at roughly 80% or more, 0 when almost nothing
+          DATA legend, by `SRC`:
+          `BRIEF` — one active idea; `ID` is its IDEA_ID. DATA is POSITIONAL,
+          pipe-delimited, six fields:
+          `stage|days_in_stage|cogs_score|time_score|brief_subtotal|unknowns`, e.g.
+          `Feasibility|134|5|5|30|none`. `days_in_stage` may be `unknown`; `unknowns`
+          is `none` or a comma-separated list of factors scored at the neutral 2.5 for
+          missing input — take it verbatim.
+          `CATEGORY` — `NAME` is the category. DATA: `ms`/`cr`/`cf` = the
+          `market_signal`, `compliance_readiness` and `channel_fit` scores (0-5);
+          `cat_sub` = those three already weighted and summed (0-50). `units90` and
+          `growth_pct` (`no_baseline` = no prior sales) are there ONLY to cite in
+          `reason`, never to re-derive `ms`.
+          `ENVELOPE` — one row: `cogs_min`/`cogs_max`, the COGS range this company
+          manufactures inside.
+          `INGREDIENT` — one row, `count=<n>; list=<complete|partial>; names: <list>;
+          end_of_list`: what the company already sources. Presence means "we already
+          buy this", absence means net-new. It carries NO stock quantities — never say
+          an ingredient is in or out of stock.
+
+          COMPLETENESS CHECK, before scoring ingredients. DO NOT COUNT THE NAMES —
+          they contain commas ("a non-caloric sweetener blend (erythritol, stevia,
+          allulose)" is ONE ingredient), so counting is always wrong. The master is
+          WHOLE when `list=complete` AND the row ends with `end_of_list`: score
+          normally, an unmatched ingredient IS genuinely net-new, and do NOT hedge to
+          the neutral score. It is CUT when `list=partial` OR `end_of_list` is missing:
+          only then, treat unmatched ingredients as UNKNOWN, score those briefs 2.5,
+          add `ingredient_availability` to their `unknowns`, and say so in
+          `### Data Gaps`. Never report net-new sourcing off a cut list.
+
+          For EVERY `BRIEF` row:
+          (1) Infer its category by matching the brief's name against the `CATEGORY`
+          names — only those, never invent one. If nothing matches use the closest and
+          say so in `reason`.
+          (2) Derive the 5-12 ingredients it would plausibly need — concrete ("whey
+          protein isolate", "dates"), not categories — and match each against the
+          `INGREDIENT` list by meaning, not exact string ("Almonds" matches "almond";
+          "Fresh cream" matches "cream"), claiming a match only when a specific listed
+          ingredient supports it.
+          (3) Score `ingredient_availability` 0-5 — THE ONLY FACTOR YOU SCORE: the
+          share of (2) that matched. 5 at roughly 80% or more; 0 when almost nothing
           matches and the idea implies a whole net-new supply chain.
-          `channel_fit` — the `chan` ratio (`listed/mapped`) for the inferred category:
-          score 5 when nearly every mapped channel is listed, 0 when almost none is.
-          BE AWARE this factor barely discriminates on current data — channel mapping
-          is blanket rather than SKU-specific, so most categories sit at or near
-          `mapped/mapped`. Treat a high ratio as "distribution exists", not as a
-          reason to rank one brief above another, and never make it the headline of a
-          `reason`. It will start discriminating when channel mapping becomes
-          per-SKU.
-          `time_in_stage` — `days`. LONGER SCORES HIGHER: a brief sitting a long time
-          in one stage needs a decision more urgently than a fresh one. Score 5 at
-          roughly 90+ days, 0 for a brief that has just arrived. `unknown` days is
-          unscorable — see the rule below.
-          UNSCORABLE FACTORS: when the underlying value is `unknown` (e.g. `fit=UNKNOWN`
-          or `days=unknown`), score that factor 2.5 — the neutral midpoint, so missing
-          data neither rewards nor punishes the brief — and add the factor's name to
-          that row's `unknowns` list. Never score a missing value 0 or 5.
-          (4) Compute `priority_score` = market_signal x 5 + cogs_vs_target x 4 +
-          ingredient_availability x 4 + compliance_readiness x 3 + channel_fit x 2 +
-          time_in_stage x 2. The weights sum to 20, so the maximum is 100. Round to
-          one decimal place. Show the per-factor scores as well as the total so the
-          number can be re-added by hand.
-          (5) Assign `priority_band`: HIGH at 70 or above, MEDIUM from 45 to below
-          70, LOW below 45.
+          (4) READ the other five off the rows: `cogs_score` and `time_score` from
+          this brief's BRIEF row, `ms`/`cr`/`cf` from its inferred category's CATEGORY
+          row. Report them as `cogs_vs_target`, `time_in_stage`, `market_signal`,
+          `compliance_readiness`, `channel_fit`.
+          (5) `priority_score` = `brief_subtotal` + `cat_sub` +
+          `ingredient_availability` x 4. That is the whole calculation — both
+          subtotals are already weighted (max 30 and 50; the ingredient factor's
+          weight 4 gives the last 20, so the max is 100). Round to one decimal.
+          (6) `unknowns` = the row's `unknowns` verbatim, dropping `none`, plus
+          `ingredient_availability` only if the master came through cut. Add nothing
+          else: a category scoring 0 for genuinely having no sales or no active SKUs
+          is a real score, not missing data.
+          (7) `priority_band`: HIGH at 70+, MEDIUM 45 to under 70, LOW under 45.
 
-          Return `ranked_pipeline`: a list with ONE object per brief, SORTED BY
-          `priority_score` DESCENDING, using EXACTLY these keys: {"rank": <1-based
-          position, dense, no ties>, "IDEA_ID": <ID>, "NAME": <NAME>, "STAGE": <stg>,
-          "DAYS_IN_STAGE": <days>, "inferred_category": <a CATEGORY name>,
-          "market_signal": <0-5>, "compliance_readiness": <0-5>, "cogs_vs_target":
-          <0-5>, "ingredient_availability": <0-5>, "channel_fit": <0-5>,
-          "time_in_stage": <0-5>, "priority_score": <0-100>, "priority_band":
-          <HIGH|MEDIUM|LOW>, "unknowns": [<factor names scored 2.5 for missing data>],
-          "reason": <ONE factual sentence, 25 words or fewer, citing the specific
-          numbers that drove this score>}. Break exact score ties by later stage
-          first (Development ahead of Capture), then by more days in stage. Include
-          EVERY brief — never a subset, never the CATEGORY/ENVELOPE/INGREDIENT rows.
+          When writing `reason` — neither of these changes a score:
+          `compliance_readiness` and `channel_fit` are CATEGORY-level proxies, so never
+          describe either as this idea's own status; and `channel_fit` barely
+          discriminates today (channel mapping is blanket, not per-SKU), so never make
+          it the headline.
 
-          ALSO produce `pipeline_summary`: a set of titled cards, each a short
-          markdown heading (`### Title`) followed by 1-3 concise factual lines drawn
-          from the scores — no padding, no speculation. Produce exactly these three
-          cards, in order: `### Top Priorities` (the top 3 named with their score and
-          the single strongest reason each), `### Held Back` (what is scoring LOW and
-          why — the common factor), `### Data Gaps` (how many briefs had unscorable
-          factors and which factors, or "None found"). Do not paste the table.
+          Return `ranked_pipeline`: ONE object per brief, SORTED BY `priority_score`
+          DESCENDING, EXACTLY these keys: {"rank": <1-based, dense, no ties>,
+          "IDEA_ID": <ID>, "NAME": <NAME>, "STAGE": <stg>, "DAYS_IN_STAGE": <days>,
+          "inferred_category": <a CATEGORY name>, "market_signal": <0-5>,
+          "compliance_readiness": <0-5>, "cogs_vs_target": <0-5>,
+          "ingredient_availability": <0-5>, "channel_fit": <0-5>, "time_in_stage":
+          <0-5>, "priority_score": <0-100>, "priority_band": <HIGH|MEDIUM|LOW>,
+          "unknowns": [<factor names scored 2.5>], "reason": <ONE factual sentence,
+          25 words or fewer, citing the numbers that drove the score>}. Break exact
+          ties by later stage first (Development ahead of Capture), then more days in
+          stage. Include EVERY brief — never a subset, never the
+          CATEGORY/ENVELOPE/INGREDIENT rows.
 
-          ALSO produce `band_counts`: an object {"HIGH": <int>, "MEDIUM": <int>,
-          "LOW": <int>, "total": <int>}.
-          ALSO produce `shortlist_reason`: ONE factual sentence (no heading, 25 words
-          or fewer) naming the top three briefs and what they have in common.
+          ALSO produce `pipeline_summary`: exactly three markdown cards, each a
+          `### Title` heading plus 1-3 concise factual lines from the scores — no
+          padding, no speculation, no pasted table. In order: `### Top Priorities`
+          (top 3, each with score and its single strongest reason), `### Held Back`
+          (what is scoring LOW and the common factor), `### Data Gaps` (how many
+          briefs had unscorable factors and which, or "None found").
 
-          ALSO produce `unknowns_count`: a SHORT string, at most 15 words, saying how
-          many briefs carried at least one unscorable factor and naming the factors —
-          e.g. "3 of 3 briefs: ingredient_availability; 1 also cogs_vs_target" — or
-          "None" when every factor scored. finalise_ranking's `### Confidence & Gaps`
-          card is written from THIS, not from `ranked_pipeline`.
+          ALSO produce `band_counts`: {"HIGH": <int>, "MEDIUM": <int>, "LOW": <int>,
+          "total": <int>}.
+          ALSO produce `shortlist_reason`: ONE sentence, no heading, 25 words or
+          fewer, naming the top three and what they have in common.
+          ALSO produce `unknowns_count`: at most 15 words on how many briefs carried
+          an unscorable factor and which — e.g. "3 of 3 briefs:
+          ingredient_availability; 1 also cogs_vs_target" — or "None".
+          finalise_ranking's `### Confidence & Gaps` card is written from THIS.
 
-          ALSO produce TWELVE SEPARATE FLAT FIELDS for the top three briefs —
-          `shortlist_1_name`, `shortlist_1_category`, `shortlist_1_score`,
-          `shortlist_1_band`, and the same four for `shortlist_2_*` and
-          `shortlist_3_*` — where `shortlist_1_*` is rank 1, `shortlist_2_*` is rank 2
-          and `shortlist_3_*` is rank 3. `_name` is that brief's NAME verbatim;
-          `_category` is its `inferred_category`; `_score` is its `priority_score` as a
-          string (e.g. "77.0"); `_band` is its `priority_band`.
-          These are plain scalars, NOT a list, for two reasons: the research steps
-          template `_name`/`_category` into a skill argument, and finalise_ranking can
-          only read facts that are individually under ~200 characters (see the
-          200-CHAR RULE above) — it CANNOT read `ranked_pipeline`, so `_score` and
-          `_band` are the only way those numbers reach it intact. Keep each one short.
+          ALSO produce TWELVE FLAT SCALARS for the top three: `shortlist_N_name`
+          (that brief's NAME verbatim), `_category` (its `inferred_category`),
+          `_score` (its `priority_score` as a string, e.g. "77.0") and `_band` (its
+          `priority_band`), for N = 1, 2, 3 by rank. Scalars, not a list: the research
+          steps template `_name`/`_category` into a skill argument, and
+          finalise_ranking cannot read `ranked_pipeline` (200-CHAR RULE above), so
+          `_score`/`_band` are the only way those numbers reach it intact.
           If there are fewer than three briefs, set every field of the missing ranks
           to the literal string "NONE". NEVER null and NEVER an empty string — the
           steps that consume these are guarded by a condition that compares against
@@ -413,26 +369,21 @@ processes:
 
       # 5. Judge the external checks against the internal ranking.
       #
-      # THIS STEP HAS NO `fetch` AND NO `skill`, AND THAT IS WHY IT IS FRAGILE.
-      # _step_input_keys() returns only a step's own fetch/skill `as` keys, so this
-      # step gets NO "STEP INPUT DATA" block (the un-truncated 9000-char slot). Every
-      # fact it can see arrives via _compact_facts(rest, budget=4000), which on
-      # overflow hands each key only `max(200, 4000 // <fact count>)` chars — with ~20
-      # facts in play that is the 200-char FLOOR, applied by slicing the JSON mid
-      # structure.
+      # THIS STEP HAS NO `fetch` AND NO `skill`, WHICH IS WHY IT IS FRAGILE. With no
+      # fetch/skill `as` key it gets NO "STEP INPUT DATA" block (the un-truncated
+      # 9000-char slot), so every fact arrives via _compact_facts(budget=4000) — on
+      # overflow each key gets only max(200, 4000/<fact count>) chars, i.e. the
+      # 200-char floor at ~20 facts, sliced mid-JSON.
       #
-      # An earlier version of this step read `ranked_pipeline` (~1.5k) and
-      # `external_signal_1/2/3` (~500 each) and produced a `final_ranking` table from
-      # them. It returned null for EVERY output on every run: it was handed four
-      # truncated JSON fragments and correctly followed its system prompt's "if a
-      # produced value cannot be determined, set it null". The reviewer saw empty
-      # cards. Do not reintroduce that shape.
+      # An earlier version read `ranked_pipeline` (~1.5k) and `external_signal_1/2/3`
+      # (~500 each) to build a `final_ranking` table, and returned null for EVERY
+      # output on every run — handed truncated JSON, it correctly followed "if a
+      # produced value cannot be determined, set it null". Do not reintroduce that.
       #
-      # So: this step now reads ONLY small scalar facts (each well under 200 chars,
-      # so the shrink never touches them) and produces only prose. The rich per-brief
-      # external detail is NOT rebuilt here — the key_data cards below read
-      # `external_signal_1/2/3` DIRECTLY, which bypasses _compact_facts entirely.
-      # If you add anything to this step's inputs, it must be a small scalar.
+      # So it reads ONLY small scalars (well under 200 chars, so the shrink never
+      # touches them) and produces only prose. The rich external detail is not rebuilt
+      # here — the key_data cards read `external_signal_1/2/3` directly, bypassing
+      # _compact_facts. Anything added to this step's inputs must be a small scalar.
       - id: finalise_ranking
         name: Finalise Ranked Pipeline
         type: agent
@@ -504,9 +455,14 @@ processes:
           three, and recommend exactly one of APPROVE, REJECT or ESCALATE.
           APPROVE when the ordering is defensible: the top briefs are there for
           reasons visible in the data, and external research did not contradict them.
-          REJECT when a factor is materially mis-scored — a brief ranked high on a
-          category with no sales, an ingredient claim the sourced list does not
-          support, or a score that does not follow from its own per-factor numbers.
+          REJECT when the judgement the model actually made is wrong: a brief matched
+          to the wrong category, an ingredient claim the sourced list does not
+          support, or a `priority_score` that is not its own `brief_subtotal` plus
+          `cat_sub` plus four times its `ingredient_availability`. Note that the other
+          five factor scores are computed in SQL from fixed ladders
+          (metadata.scoring_ladders) and are correct by construction — do not reject
+          the ranking by re-deriving them by hand. If you think a ladder itself is
+          wrong, that is a change to the ladder, not a fault in this run.
           ESCALATE when the ranking cannot be trusted rather than being wrong: a
           large share of briefs carrying unscorable factors (most often a missing
           target COGS or a missing stage date), all three external searches returning
@@ -538,22 +494,66 @@ processes:
       # writeback or digest is ever wanted; note that a dataset_upsert action fires
       # ONCE per decision, not once per row, so ~38 rows would need a foreach step.
 
-      # Single source of truth for the scoring weights. The ladder in
-      # score_and_rank_pipeline's instruction must stay numerically in sync — agent
-      # instructions are plain text, not templated from metadata, so this file has
-      # no way to make the prompt read these values automatically.
-      # Weights sum to 20 and each factor scores 0-5, so priority_score maxes at 100.
+      # Single source of truth for the scoring weights. Weights sum to 20 and each
+      # factor scores 0-5, so priority_score maxes at 100.
+      #
+      # SQL IS NOW THE ARITHMETIC OWNER. Five of the six factors are scored, weighted
+      # and part-summed in V_PIPELINE_PRIORITY_CANDIDATES (sql/views.sql) — the model
+      # only scores ingredient_availability and adds three numbers. So these values
+      # now have THREE copies that must change together: here, the ladders below, and
+      # the CASE expressions in that view. Agent instructions are plain text and are
+      # not templated from metadata, so none of it syncs automatically.
       scoring_weights:
-        market_signal: 5
-        cogs_vs_target: 4
-        ingredient_availability: 4
-        compliance_readiness: 3
-        channel_fit: 2
-        time_in_stage: 2
+        market_signal: 5           # in cat_sub, computed in SQL
+        cogs_vs_target: 4          # in brief_sub, computed in SQL
+        ingredient_availability: 4 # applied by the model — the only weight it multiplies
+        compliance_readiness: 3    # in cat_sub, computed in SQL
+        channel_fit: 2             # in cat_sub, computed in SQL
+        time_in_stage: 2           # in brief_sub, computed in SQL
 
       scoring_bands:
         high_gte: 70
         medium_gte: 45
+
+      # The cut-points behind every SQL-computed factor score. These were previously
+      # soft language in the prompt ("roughly 90+ days", "nearly every SKU", "high
+      # volume with positive growth"), which the model re-interpolated on every run —
+      # the source of the score drift the header note describes. Made explicit here so
+      # they are reviewable and tunable; mirrored exactly by the scoring CTEs in
+      # V_PIPELINE_PRIORITY_CANDIDATES.
+      #
+      # NOTE the difference between 0 and the 2.5 neutral. 2.5 is ONLY for a factor
+      # whose input is literally missing (no target COGS, no stage date) and always
+      # comes with the factor named in `unknowns`. A category with no sales or no
+      # active SKUs scores a genuine 0 — that is a measured "we do not sell here",
+      # not an absence of data, and must not be softened to the midpoint.
+      scoring_ladders:
+        # 0-3 on realised 90-day volume plus 0-2 on growth; absolute thresholds, not
+        # percentiles — there are only six categories, so a percentile over that
+        # population would swing on one category moving.
+        market_signal:
+          units_90d: { zero_or_null: 0, lt_500: 1, lt_2000: 2, gte_2000: 3 }
+          growth_pct: { no_baseline_or_negative: 0, lt_25: 1, gte_25: 2 }
+        # ROUND(5 x mean of the label / barcode / allergen presence ratios).
+        compliance_readiness: { formula: "round(5 * mean(label_ok, barcode, allergen) / active_skus)", no_active_skus: 0 }
+        # ROUND(5 x channels_listed / channels_mapped).
+        channel_fit: { formula: "round(5 * channels_listed / channels_mapped)", no_channels_mapped: 0 }
+        # The one ladder that was already exact in the prompt. BELOW is 4, not 5:
+        # cheaper than anything we make today means the margin looks good but the
+        # target is unproven.
+        cogs_vs_target: { INSIDE: 5, BELOW: 4, ABOVE: 2, UNKNOWN: 2.5 }
+        # LONGER SCORES HIGHER — an aging brief needs a decision more urgently.
+        time_in_stage:
+          days_lt_15: 0
+          days_15_to_30: 1
+          days_31_to_45: 2
+          days_46_to_60: 3
+          days_61_to_89: 4
+          days_gte_90: 5
+          days_unknown: 2.5
+        # NOT computed in SQL — needs ingredients derived from a brief's name and
+        # matched by meaning. Scored by the model, against this target.
+        ingredient_availability: { matched_share_gte_80pct: 5, almost_nothing_matched: 0, master_came_through_cut: 2.5 }
 
       # Documents the web-research fan-out. Changing this number means adding or
       # removing `research_shortlist_N` steps by hand — see the ponytail note.
@@ -690,10 +690,12 @@ processes:
       # recommendation live.
       policy_rules:
         - "`priority_candidates` is the complete un-truncated input set; read `SRC` to tell briefs from category, envelope and ingredient reference rows, and score every `SRC='BRIEF'` row — never a subset."
-        - "Market signal comes from realised category demand (`units90`, `growth_pct`). Competitor counts are a TIEBREAKER ONLY — they come from 16 hand-curated rows, and `not_comparable` means the category vocabularies don't align, not that there are no competitors."
+        - "Five of the six factors are ALREADY SCORED in SQL and are correct per row — `cogs_score`/`time_score`/`brief_subtotal` on the BRIEF row, `ms`/`cr`/`cf`/`cat_sub` on the CATEGORY row. Read them; never recompute them from the raw numbers."
+        - "The model scores exactly one factor, `ingredient_availability`, and performs one calculation: `priority_score` = `brief_subtotal` + `cat_sub` + `ingredient_availability` x 4, max 100."
+        - "Market signal comes from realised category demand (`units90`, `growth_pct`) alone. Competitor counts are deliberately NOT part of the score — they come from 16 hand-curated rows whose category vocabulary often doesn't align with ours — and are shown to the reviewer on the Category Demand card only."
         - "The ingredient list records only what is already sourced, with no stock quantities — never state that an ingredient is in or out of stock, only that it is already sourced or would be net-new."
         - "compliance_readiness and channel_fit are CATEGORY-level proxies. A brief in a well-covered category has an easier compliance path, not a compliant label."
-        - "A factor whose input is `unknown` scores 2.5 (the neutral midpoint) and is named in that row's `unknowns` list — never 0 and never 5."
+        - "The 2.5 neutral is only for a factor whose input value is missing (no target COGS, no stage date); SQL flags those in the row's `unknowns` field. A category scoring 0 for genuinely having no sales or no active SKUs is a real score and is NOT an unknown."
         - "time_in_stage scores HIGHER the longer a brief has sat: an aging brief needs a decision more urgently than a fresh one."
         - "External web research covers only the top 3 of ~38 briefs. It may confirm, caveat or flag them, but must never re-order the ranking or change a `priority_score`, and a brief without external research must not be penalised for it."
         - "Recommend:

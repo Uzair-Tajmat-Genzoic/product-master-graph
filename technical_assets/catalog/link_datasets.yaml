@@ -181,21 +181,7 @@ datasets:
       - { entity_attribute: id, table_column: IDEA_ID }
     columns: [IDEA_ID, NAME, STAGE, HYPOTHESIS, THESIS_FIT, TARGET_COGS_INR, STAGE_ENTERED_AT]
 
-  - entity_type: Product
-    name: Time in stage
-    description: Per-idea DAYS_IN_STAGE, computed live from DIM_IDEA.STAGE_ENTERED_AT
-      (V_IDEA_STAGE_AGE). Resets only when STAGE changes — a re-triage at the same
-      stage does not restart the clock.
-    source_table: V_IDEA_STAGE_AGE
-    connection: pim_bq
-    cardinality: "1:m"
-    join_keys:
-      - { entity_attribute: id, table_column: IDEA_ID }
-    columns: [IDEA_ID, NAME, STAGE, STAGE_ENTERED_AT, DAYS_IN_STAGE]
-
-  # Deterministic per-brief scoring inputs for innovation_pipeline_prioritisation:
-  # days in stage, target COGS against the manufacturable envelope, and the SQL-banded
-  # COGS_FIT. Read as the `active_briefs` context key (and browsable per idea here).
+  # Read as the `active_briefs` context key, and browsable per idea here.
   - entity_type: Product
     name: Brief scoring inputs
     description: Per-idea priority-scoring inputs for the active pipeline (V_IDEA_PRIORITY_INPUTS)
