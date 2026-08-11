@@ -179,7 +179,20 @@ datasets:
     cardinality: "1:m"
     join_keys:
       - { entity_attribute: id, table_column: IDEA_ID }
-    columns: [IDEA_ID, NAME, STAGE, HYPOTHESIS, THESIS_FIT, TARGET_COGS_INR]
+    columns: [IDEA_ID, NAME, STAGE, HYPOTHESIS, THESIS_FIT, TARGET_COGS_INR, STAGE_ENTERED_AT]
+
+  # Read as the `active_briefs` context key, and browsable per idea here.
+  - entity_type: Product
+    name: Brief scoring inputs
+    description: Per-idea priority-scoring inputs for the active pipeline (V_IDEA_PRIORITY_INPUTS)
+      — DAYS_IN_STAGE, STAGE_RANK, TARGET_COGS_INR vs the portfolio COGS envelope, and the
+      COGS_FIT band. Active briefs only (STAGE not Rejected/Launch).
+    source_table: V_IDEA_PRIORITY_INPUTS
+    connection: pim_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: IDEA_ID }
+    columns: [IDEA_ID, NAME, STAGE, HYPOTHESIS, THESIS_FIT, TARGET_COGS_INR, DAYS_IN_STAGE, STAGE_RANK, PORTFOLIO_MIN_COGS_INR, PORTFOLIO_MAX_COGS_INR, COGS_FIT]
 
   - entity_type: Product
     name: Portfolio products
@@ -240,6 +253,58 @@ datasets:
     join_keys:
       - { entity_attribute: id, table_column: CANDIDATE_ID }
     columns: [SOURCE, CANDIDATE_ID, NAME, STAGE, HYPOTHESIS, THESIS_FIT, TARGET_COGS_INR, CITY, COMPETITOR_ID, CATEGORY]
+
+  - entity_type: Product
+    name: Pipeline priority candidates
+    description: Active briefs + per-category demand/compliance/channel reference + the cost
+      envelope + the ingredient master, unioned into one narrow rowset behind a SRC
+      discriminator, read cross-type via dataset_search by innovation_pipeline_prioritisation's
+      scoring step so all ~38 briefs arrive un-truncated through a single fetch. Four columns
+      only, and the reference grains are packed into DATA, because STEP INPUT DATA is capped at
+      9000 chars (see the view's header comment in sql/views.sql). Not entity-scoped — never
+      rendered as a Product widget.
+    source_table: V_PIPELINE_PRIORITY_CANDIDATES
+    connection: pim_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: ID }
+    columns: [SRC, ID, NAME, DATA]
+
+  - entity_type: Product
+    name: Category market signal
+    description: Realised demand per product category (V_CATEGORY_MARKET_SIGNAL) — units and
+      revenue over the trailing 90 days vs the prior 90, growth %, forward forecast, active SKUs,
+      plus competitor counts as a tiebreaker. The evidence behind the market-signal factor in
+      innovation_pipeline_prioritisation. Category-grained, not entity-scoped.
+    source_table: V_CATEGORY_MARKET_SIGNAL
+    connection: pim_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: CATEGORY_NAME }
+    columns: [CATEGORY_NAME, UNITS_90D, NET_REVENUE_90D, UNITS_PRIOR_90D, GROWTH_PCT, FORECAST_UNITS_NEXT, ACTIVE_SKUS_IN_CATEGORY, ACTIVE_COMPETITOR_PRODUCTS, DISTINCT_COMPETITORS]
+
+  # --- attached to Category ----------------------------------------------
+  # REQUIRED for innovation_pipeline_prioritisation's `active_categories` context key.
+  # dataset_search resolves (entity_type, dataset) through THIS catalog, not through the
+  # process YAML: without this row the read fails with
+  #   POST /datasets/search -> 404: No dataset linking 'DIM_CATEGORY' to 'Category'.
+  # The key is `required: false`, so that 404 does not fail the run — it fails SILENTLY,
+  # and its real job is to mint Category nodes onto the entity snapshot. A full sweep
+  # resolves no entity from the event, so with this link missing the run ends with
+  # `entities=0`, save_entity_snapshot writes `entities: []`, and the UI hides the whole
+  # Full Context tab (page.tsx TABS.filter). Category.id == CATEGORY_ID, matching the
+  # `post.resolve` spec on that context key ({field: CATEGORY_ID, type: Category}).
+  - entity_type: Category
+    name: Category master
+    description: Every product category in the taxonomy (DIM_CATEGORY) — Desserts, Health
+      Bars, Snacks, Mithai, Savories, Dessert bites. Read as the `active_categories`
+      context key so a sweep's entity snapshot carries the categories it scored against.
+    source_table: DIM_CATEGORY
+    connection: pim_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: CATEGORY_ID }
+    columns: [CATEGORY_ID, CATEGORY_NAME]
 
 widgets:
   # --- Store page --------------------------------------------------------
