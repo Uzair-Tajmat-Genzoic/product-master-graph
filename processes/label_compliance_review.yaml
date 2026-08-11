@@ -444,6 +444,14 @@ processes:
       version: 1
       priority: 10
 
+      # Run each agent step's FULL body (skill/fetch AND the LLM `produces` pass)
+      # before the first human gate — not just prefetch. The gates read produced
+      # facts in their key_data (e.g. brief_designer shows `required_changes` from
+      # identify_required_changes), and when a conditional gate like
+      # provide_current_label is SKIPPED the flow reaches the next gate on the same
+      # pass, so those upstream produces must have run.
+      run_steps_before_gate: true
+
       # Pre-fetch the SKU's enriched label facts (dataset query, scoped to the
       # Product on the event) so the agent steps reason over real data.
       context_package:
