@@ -116,7 +116,12 @@ processes:
         name: Verify Current Label (FSSAI + Image Analysis)
         type: agent
         after: download_label_from_drive
-        condition: '{{label_file_status}} == "found"'
+        # Branch on the download skill's OWN deterministic result, not an LLM-set flag.
+        # drive_download.file_count comes straight from download_folder. (Gating on an
+        # LLM-produced label_file_status was unreliable: when the LLM left it unset the
+        # condition eval'd `null == "found"`, errored, and fail-opened — so BOTH this step
+        # and provide_current_label ran even on a successful download.)
+        condition: '{{drive_download.file_count}} > 0'
         description: Run the FSSAI labelling checklist against the label file downloaded from Drive.
         instruction: >
           Review the compliance-verifier result for the CURRENT label downloaded from Google
@@ -159,7 +164,7 @@ processes:
         name: Provide Current Label File
         type: decision
         after: download_label_from_drive
-        condition: '{{label_file_status}} == "missing"'
+        condition: '{{drive_download.file_count}} == 0'   # deterministic: no files downloaded
         description: The label file could not be downloaded from Drive — reviewer retries or proceeds.
         instruction: >
           The current label artwork could NOT be downloaded from the on-record Google Drive
