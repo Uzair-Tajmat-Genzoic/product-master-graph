@@ -73,40 +73,95 @@ JOIN `gen-lang-client-0520145261.ctx_upside_master_data.DIM_CATEGORY`       c ON
 WHERE v.IS_ACTIVE
 GROUP BY 1, 2, 3;
 
--- Triage similarity candidates: every pipeline idea plus every active competitor
--- product, unioned into ONE rowset so idea_capture_triage's first step can pull
--- them through a single step-level `fetch:` and see them UN-TRUNCATED. Reading
--- them as two separate context_package keys previews each list down to 4 rows
--- (_compact_facts), which silently hid 12 of 16 competitor products.
+-- Triage similarity candidates: five grains in one rowset behind a SRC discriminator,
+-- read by idea_capture_triage's two matching steps.
+--
+-- FOUR PACKED COLUMNS, as V_PIPELINE_PRIORITY_CANDIDATES below. STEP INPUT DATA is a silent
+-- 9000-char TAIL slice and every column name repeats as a JSON key per row; the old
+-- ten-column shape measured 16904. Fields are packed positionally into D — keep this layout
+-- in sync with each step's legend. HYPOTHESIS/THESIS_FIT dropped: free text per row, and
+-- dataset_upsert coalesces nulls, so the write-back survives without them.
+--
+-- D by SRC:
+--   1_IDEA  <stage>|<target_cogs>
+--   2_PORT  <status>|<category>|<cogs>   (ProductStatus, not IdeaStage)
+--   3_CAT   <packed k=v counts>
+--   4_COMP  <competitor_id>|<category>
+--   9_END   empty
+--
+-- SPLIT ACROSS TWO STEPS, each with its own 9000 budget: match_pipeline_ideas filters
+-- SRC IN ('1_IDEA','9_END'), match_portfolio_and_market takes the rest. Packed-but-unsplit
+-- fits today at 7790, but DIM_IDEA grows on every approve/reject.
+--
+-- SRC IS NUMERICALLY PREFIXED so alphabetical order is importance order: both steps read
+-- `order_by: SRC asc` and the cut takes the TAIL. Place new grains by importance, 9_END last.
+--
+-- MEASURED: step A 673 chars / 7 rows, step B 6441 / 57. Re-measure on any change:
+--   SELECT LENGTH(TO_JSON_STRING(ARRAY_AGG(t))) FROM V_TRIAGE_SIMILARITY_CANDIDATES t
+-- If B overflows, cut in order: COMP cap below 2, then CAT's units_90d/growth_pct, then NM
+-- length. NOT by lowering `limit` — that drops whole tail arms including the sentinel,
+-- hiding the overflow this design exists to expose.
 CREATE OR REPLACE VIEW `gen-lang-client-0520145261.ctx_upside_master_data.V_TRIAGE_SIMILARITY_CANDIDATES` AS
+-- 1_IDEA — every pipeline idea, rejected ones included: a prior rejection is the strongest
+-- REJECT signal the triage has.
 SELECT
-  'IDEA'                                AS SOURCE,
-  i.IDEA_ID                             AS CANDIDATE_ID,
-  i.NAME                                AS NAME,
-  i.STAGE                               AS STAGE,
-  i.HYPOTHESIS                          AS HYPOTHESIS,
-  i.THESIS_FIT                          AS THESIS_FIT,
-  CAST(i.TARGET_COGS_INR AS STRING)     AS TARGET_COGS_INR,
-  CAST(NULL AS STRING)                  AS CITY,
-  CAST(NULL AS STRING)                  AS COMPETITOR_ID,
-  CAST(NULL AS STRING)                  AS CATEGORY
+  '1_IDEA'                              AS SRC,
+  i.IDEA_ID                             AS ID,
+  i.NAME                                AS NM,
+  CONCAT(IFNULL(i.STAGE, ''), '|', IFNULL(CAST(i.TARGET_COGS_INR AS STRING), '')) AS D
 FROM `gen-lang-client-0520145261.ctx_upside_master_data.DIM_IDEA` i
 UNION ALL
+-- 2_PORT — every active SKU. One missing here reads as "no duplicate", and
+-- portfolio_duplicate EXACT is a TIER 1 auto-reject.
 SELECT
-  'COMPETITOR_PRODUCT'                  AS SOURCE,
-  cp.COMPETITOR_PRODUCT_ID              AS CANDIDATE_ID,
-  cp.PRODUCT_NAME                       AS NAME,
-  CAST(NULL AS STRING)                  AS STAGE,
-  CAST(NULL AS STRING)                  AS HYPOTHESIS,
-  CAST(NULL AS STRING)                  AS THESIS_FIT,
-  CAST(NULL AS STRING)                  AS TARGET_COGS_INR,
-  cp.CITY                               AS CITY,
-  cp.COMPETITOR_ID                      AS COMPETITOR_ID,
-  cm.CATEGORY                           AS CATEGORY
-FROM `gen-lang-client-0520145261.ctx_upside_master_data.DIM_COMPETITOR_PRODUCT` cp
-LEFT JOIN `gen-lang-client-0520145261.ctx_upside_master_data.DIM_COMPETITOR` cm
-  ON cm.COMPETITOR_ID = cp.COMPETITOR_ID AND cm.IS_ACTIVE
-WHERE cp.IS_ACTIVE;
+  '2_PORT'                              AS SRC,
+  v.SKU                                 AS ID,
+  v.DISPLAY_NAME                        AS NM,
+  CONCAT(IFNULL(CAST(v.STATUS AS STRING), ''), '|', IFNULL(c.CATEGORY_NAME, ''), '|',
+         IFNULL(CAST(ROUND(v.TOTAL_COGS_INR) AS STRING), '')) AS D
+FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_PRODUCT_ENRICHED` v
+JOIN `gen-lang-client-0520145261.ctx_upside_master_data.DIM_PRODUCT`  d ON d.SKU = v.SKU
+JOIN `gen-lang-client-0520145261.ctx_upside_master_data.DIM_CATEGORY` c ON c.CATEGORY_ID = d.CATEGORY_ID
+WHERE v.IS_ACTIVE
+UNION ALL
+-- 3_CAT — one row per category, so competitor counts are READ, not counted off the capped
+-- COMP rows. NULL IS NOT ZERO on the two competitor fields: DIM_COMPETITOR.CATEGORY is free
+-- text and V_CATEGORY_MARKET_SIGNAL LEFT JOINs a normalised key, so NULL means "vocabulary
+-- doesn't align", not "no competitors" — IFNULL(...,0) would erase that. ACTIVE_SKUS is
+-- different: NULL there is a measured "we don't sell here".
+SELECT
+  '3_CAT'                               AS SRC,
+  s.CATEGORY_NAME                       AS ID,
+  s.CATEGORY_NAME                       AS NM,
+  CONCAT(
+    'competitor_products=', IFNULL(CAST(s.ACTIVE_COMPETITOR_PRODUCTS AS STRING), 'not_comparable'),
+    '; competitors=',       IFNULL(CAST(s.DISTINCT_COMPETITORS       AS STRING), 'not_comparable'),
+    '; active_skus=',       IFNULL(CAST(s.ACTIVE_SKUS_IN_CATEGORY    AS STRING), '0'),
+    '; units_90d=',         IFNULL(CAST(s.UNITS_90D                  AS STRING), 'none'),
+    '; growth_pct=',        IFNULL(CAST(s.GROWTH_PCT                 AS STRING), 'no_baseline')
+  )                                     AS D
+FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_CATEGORY_MARKET_SIGNAL` s
+UNION ALL
+-- 4_COMP — active competitor products, CAPPED AT 2 PER CATEGORY. Examples only; the counts
+-- live on 3_CAT. Never count these rows.
+SELECT SRC, ID, NM, D FROM (
+  SELECT
+    '4_COMP'                            AS SRC,
+    cp.COMPETITOR_PRODUCT_ID            AS ID,
+    cp.PRODUCT_NAME                     AS NM,
+    CONCAT(IFNULL(cp.COMPETITOR_ID, ''), '|', IFNULL(cm.CATEGORY, '')) AS D,
+    ROW_NUMBER() OVER (PARTITION BY cm.CATEGORY ORDER BY cp.COMPETITOR_PRODUCT_ID) AS rn
+  FROM `gen-lang-client-0520145261.ctx_upside_master_data.DIM_COMPETITOR_PRODUCT` cp
+  LEFT JOIN `gen-lang-client-0520145261.ctx_upside_master_data.DIM_COMPETITOR` cm
+    ON cm.COMPETITOR_ID = cp.COMPETITOR_ID AND cm.IS_ACTIVE
+  WHERE cp.IS_ACTIVE
+)
+WHERE rn <= 2
+UNION ALL
+-- 9_END — ONE sentinel, the only thing making "un-truncated" checkable rather than asserted.
+-- Both steps include it and '9_' sorts after every other label, so it is the first row a
+-- tail cut destroys: absent means cut. Never renumber it below an arm.
+SELECT '9_END' AS SRC, 'END_OF_CANDIDATES' AS ID, 'END_OF_CANDIDATES' AS NM, '' AS D;
 
 -- ---------------------------------------------------------------------
 -- Innovation pipeline prioritisation (processes/innovation_pipeline_prioritisation.yaml)

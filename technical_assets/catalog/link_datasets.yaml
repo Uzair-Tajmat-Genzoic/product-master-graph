@@ -246,13 +246,22 @@ datasets:
 
   - entity_type: Product
     name: Triage similarity candidates
-    description: Pipeline ideas + active competitor products unioned into one candidate set, read cross-type via dataset_search by idea_capture_triage's first step so the similarity match sees every row un-truncated. Not entity-scoped — never rendered as a Product widget.
+    description: >-
+      Pipeline ideas + live SKUs + per-category counts + competitor examples + an end-of-list
+      sentinel, unioned into one candidate set behind a numerically-prefixed SRC discriminator.
+      Read cross-type via dataset_search by idea_capture_triage's TWO matching steps, each
+      filtering SRC to its own arms so each gets its own 9000-char step-input budget. FOUR
+      PACKED COLUMNS: a column name is a JSON key on every row, and the previous ten-column
+      shape measured 16904 chars against a 9000 cap. Per-grain fields are packed positionally
+      into D — see sql/views.sql for the layout. Every column a step references, in `columns`
+      or in `filters`, must be declared below or the read 400s. Not entity-scoped — never
+      rendered as a Product widget.
     source_table: V_TRIAGE_SIMILARITY_CANDIDATES
     connection: pim_bq
     cardinality: "1:m"
     join_keys:
-      - { entity_attribute: id, table_column: CANDIDATE_ID }
-    columns: [SOURCE, CANDIDATE_ID, NAME, STAGE, HYPOTHESIS, THESIS_FIT, TARGET_COGS_INR, CITY, COMPETITOR_ID, CATEGORY]
+      - { entity_attribute: id, table_column: ID }
+    columns: [SRC, ID, NM, D]
 
   - entity_type: Product
     name: Pipeline priority candidates
