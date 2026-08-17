@@ -693,3 +693,62 @@ FROM `gen-lang-client-0520145261.bronze.MARKETING_BUDGET` b
 JOIN `gen-lang-client-0520145261.bronze.MARKETING_SEGMENT_MASTER` s
   ON b.SEGMENT_TYPE = s.SEGMENT_CODE
  AND UPPER(b.CHANNEL) = UPPER(s.CHANNEL);
+
+-- ============================================================================
+-- ============================================================================
+-- V_REVIEW_COMPLAINT_CANDIDATES -- input to formulation_feedback_loop process.
+-- ============================================================================
+-- Narrows low-rated reviews (<= 3 stars) from the last 30 days. Formats date (D),
+-- computes integer day index (N) for rolling 14-day window evaluation, truncates
+-- text (T) to 140 chars for prompt budget, and extracts matched SKU (P).
+CREATE OR REPLACE VIEW `gen-lang-client-0520145261.bronze.V_REVIEW_COMPLAINT_CANDIDATES` AS
+WITH fams AS (
+  SELECT MIN(SKU) AS SKU, FAM FROM (
+    SELECT SKU, TRIM(REGEXP_REPLACE(
+        REGEXP_REPLACE(DISPLAY_NAME, r'(?i)^(Dessert|Mithai|Snack|Savoury|Fudge)\s*-\s*', ''),
+        r'(?i)[-\s]*\d+\s*(gm|gms|g|kg|ml)\b\.?', '')) AS FAM
+    FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_PRODUCT_ENRICHED`
+    WHERE IS_ACTIVE)
+  GROUP BY FAM
+),
+base AS (
+  SELECT
+    REVIEW_ID,
+    MASTER_STORE_ID                            AS S,
+    FORMAT_DATE('%Y-%m-%d', DATE(REVIEW_DATE)) AS D,
+    DATE_DIFF(DATE(REVIEW_DATE), DATE '2026-01-01', DAY) AS N,
+    SUBSTR(REVIEW_TEXT, 0, 140)                AS T
+  FROM `gen-lang-client-0520145261.bronze.CUSTOMER_REVIEW_EVENTS`
+  WHERE REVIEW_DATE >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+    AND STAR_RATING <= 3
+)
+SELECT b.S, b.D, b.N, b.T, IFNULL(f.SKU, '') AS P
+FROM base b
+LEFT JOIN fams f ON STRPOS(UPPER(b.T), UPPER(f.FAM)) > 0
+-- Deduplicate reviews matching multiple product families (longest match wins).
+QUALIFY ROW_NUMBER() OVER (PARTITION BY b.REVIEW_ID
+                           ORDER BY LENGTH(IFNULL(f.FAM, '')) DESC) = 1;
+
+
+-- ============================================================================
+-- V_PRODUCT_FAMILY_NAMES -- closed product vocabulary for formulation_feedback_loop.
+-- ============================================================================
+-- Single-row reference view aggregating active product family names (NM) and 
+-- entry-pack COGS (CG) into a pipe-separated string to ground LLM clustering.
+CREATE OR REPLACE VIEW `gen-lang-client-0520145261.ctx_upside_master_data.V_PRODUCT_FAMILY_NAMES` AS
+SELECT
+  'FAMILIES' AS ID,                       -- constant: the link needs a join column, but this is never entity-scoped
+  STRING_AGG(fam, ' | ' ORDER BY fam) AS NM,
+  STRING_AGG(IF(cogs IS NULL, NULL, FORMAT('%s=%d', fam, cogs)), ' | ' ORDER BY fam) AS CG
+FROM (
+  SELECT
+    TRIM(
+      REGEXP_REPLACE(
+        REGEXP_REPLACE(DISPLAY_NAME, r'(?i)^(Dessert|Mithai|Snack|Savoury|Fudge)\s*-\s*', ''),
+        r'(?i)[-\s]*\d+\s*(gm|gms|g|kg|ml)\b\.?', '')
+    ) AS fam,
+    CAST(ROUND(MIN(CAST(TOTAL_COGS_INR AS FLOAT64))) AS INT64) AS cogs
+  FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_PRODUCT_ENRICHED`
+  WHERE IS_ACTIVE
+  GROUP BY fam
+);
