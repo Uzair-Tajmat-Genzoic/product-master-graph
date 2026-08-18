@@ -76,7 +76,7 @@ processes:
       - {
           name: report_decision,
           type: enum,
-          values: [APPROVE, REJECT, ESCALATE],
+          values: ["Send to Marketing Team", "Hold Report", "Escalate (No Data)"],
         }
 
     steps:
