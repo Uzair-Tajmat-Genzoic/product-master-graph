@@ -246,9 +246,9 @@ processes:
           stop, reduce_budget, maintain, increase_budget_cautious,
           increase_budget_confident, or validate_outlier), each with its
           evidence-backed reason. Recommend
-          APPROVE to carry all of these into the final action plan, REJECT
-          to hold the whole batch back this run (e.g. a known seasonal dip
-          that shouldn't trigger any changes yet).
+          "Apply Campaign Changes" to carry all of these into the final action
+          plan, "Hold Changes" to hold the whole batch back this run (e.g. a
+          known seasonal dip that shouldn't trigger any changes yet).
 
           `campaign_action_suggestions` is already provided above — do NOT
           call collect_context or any other tool to search for or verify it.
@@ -259,9 +259,9 @@ processes:
           conversion figures) in `reason` — never state that evidence,
           insight, or data is lacking or that action suggestions weren't
           gathered; that evidence is already present in every row above.
-          Only recommend REJECT for a substantive reason (e.g. a known
+          Only recommend "Hold Changes" for a substantive reason (e.g. a known
           seasonal dip), never for a perceived absence of data.
-        decision_options: [APPROVE, REJECT]
+        decision_options: ["Apply Campaign Changes", "Hold Changes"]
         rationale_from: campaign_action_suggestions
         produces:
           - actions_decision
@@ -420,16 +420,16 @@ processes:
         instruction: >
           Review `expansion_suggestions` — proposed new campaigns, each
           modeled on a proven high-performing campaign or an already-funded
-          but unused budget line. Recommend APPROVE to carry these into the
-          final action plan, REJECT to hold them back this run (e.g.
-          product/menu isn't ready to launch yet).
+          but unused budget line. Recommend "Launch New Campaigns" to carry
+          these into the final action plan, "Skip Expansion" to hold them back
+          this run (e.g. product/menu isn't ready to launch yet).
 
           `expansion_suggestions` is already provided above — do NOT call
           collect_context or any other tool to search for or verify it. A
           tool search for this fact will find nothing (it is a process fact,
           not a graph entity) and an empty tool result does NOT mean the
           data is missing; judge only what's already given to you.
-        decision_options: [APPROVE, REJECT]
+        decision_options: ["Launch New Campaigns", "Skip Expansion"]
         rationale_from: expansion_suggestions
         produces:
           - expansion_decision
@@ -471,10 +471,12 @@ processes:
           governed separately by `expansion_decision`. A decision fact is
           present only when there was something to review; when the
           underlying suggestion list was already empty the gate was skipped
-          and its decision fact won't exist — treat a missing decision the
-          same as APPROVE (there's nothing to exclude anyway). Include a
-          suggestion set in `flagged_campaigns` UNLESS its governing
-          decision is exactly "REJECT".
+          and its decision fact won't exist — treat a missing decision as
+          "include" (there's nothing to exclude anyway). Include
+          `campaign_action_suggestions` in `flagged_campaigns` UNLESS
+          `actions_decision` is exactly "Hold Changes"; include
+          `expansion_suggestions` UNLESS `expansion_decision` is exactly
+          "Skip Expansion".
 
           Concatenate the included sets — `campaign_action_suggestions`,
           then `expansion_suggestions` — into `flagged_campaigns`: a JSON
@@ -538,23 +540,23 @@ processes:
           Review flagged_summary and flagged_campaigns — the CONSOLIDATED
           plan from the two gates above (each already approved or rejected
           individually). This gate is about whether to SEND it, not
-          re-litigate each set. Recommend ESCALATE if `campaign_comparison`
-          itself was empty this run (no campaigns currently running at all —
-          nothing to review), OR if every row's DATE in `campaign_comparison`
-          is more than 2 days older than `scheduled_at` (when `scheduled_at`
-          is present) — that gap means the underlying view hasn't refreshed
-          and every recommendation above would be acting on stale data;
-          state that explicitly rather than sending a plan built on it. An
-          empty
+          re-litigate each set. Recommend "Escalate (No Data)" if
+          `campaign_comparison` itself was empty this run (no campaigns
+          currently running at all — nothing to review), OR if every row's
+          DATE in `campaign_comparison` is more than 2 days older than
+          `scheduled_at` (when `scheduled_at` is present) — that gap means the
+          underlying view hasn't refreshed and every recommendation above
+          would be acting on stale data; state that explicitly rather than
+          sending a plan built on it. An empty
           `flagged_campaigns` with a non-empty `campaign_comparison` is a
-          different, normal case — every set was rejected above — and is
+          different, normal case — every set was held back above — and is
           NOT a reason to escalate. In that case, and in every other case,
-          recommend APPROVE to send the performance + optimisation summary
-          to the marketing team, whether or not any campaigns were flagged
-          this run. Only recommend REJECT if flagged_summary itself looks
-          wrong or incomplete (e.g. contradicts flagged_campaigns, or a
-          category/suggested_action is missing or inconsistent) and
-          shouldn't go out as-is.
+          recommend "Send to Marketing Team" to send the performance +
+          optimisation summary to the marketing team, whether or not any
+          campaigns were flagged this run. Only recommend "Hold Report" if
+          flagged_summary itself looks wrong or incomplete (e.g. contradicts
+          flagged_campaigns, or a category/suggested_action is missing or
+          inconsistent) and shouldn't go out as-is.
 
           `flagged_summary` and `flagged_campaigns` are already provided
           above — do NOT call collect_context or any other tool to search
@@ -562,7 +564,7 @@ processes:
           nothing (they are process facts, not graph entities) and an empty
           tool result does NOT mean the data is missing; judge only what's
           already given to you.
-        decision_options: [APPROVE, REJECT, ESCALATE]
+        decision_options: ["Send to Marketing Team", "Hold Report", "Escalate (No Data)"]
         rationale_from: flagged_summary
         produces:
           - report_decision
@@ -624,7 +626,7 @@ processes:
         name: Email Performance & Optimisation Summary
         type: notify
         after: review
-        condition: '{{report_decision}} == "APPROVE"'
+        condition: '{{report_decision}} == "Send to Marketing Team"'
         description: On approve, format and email the marketing team the action plan.
         produces:
           - report_sent
@@ -673,7 +675,7 @@ processes:
         name: Hold Without Sending
         type: notify
         after: review
-        condition: '{{report_decision}} == "REJECT"'
+        condition: '{{report_decision}} == "Hold Report"'
         description: Reviewed and held — no email sent this run.
         action:
           type: simulated
@@ -685,7 +687,7 @@ processes:
         name: Escalate — No Campaign Data
         type: notify
         after: review
-        condition: '{{report_decision}} == "ESCALATE"'
+        condition: '{{report_decision}} == "Escalate (No Data)"'
         description: No campaign performance data returned this run — escalate for review.
         action:
           type: simulated
@@ -693,7 +695,7 @@ processes:
             note: "Campaign planning & optimisation escalated — no campaign performance data returned this run."
 
     metadata:
-      version: 7
+      version: 8
       priority: 15
 
       # Single source of truth for the evaluation/expansion thresholds — edit

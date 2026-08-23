@@ -57,10 +57,10 @@ processes:
         instruction: >
           `demand_plan` is the fully-assembled, pre-scored plan. Write a SHORT summary:
           how many SKUs to transfer vs liquidate vs supply-from-factory, across how many
-          stores, and the most urgent (smallest days_to_expiry). Recommend APPROVE to
-          begin actioning the plan row by row; recommend REJECT to hold the whole plan.
-          Do not paste the table.
-        decision_options: [APPROVE, REJECT]
+          stores, and the most urgent (smallest days_to_expiry). Recommend "Action the
+          Plan" to begin actioning the plan row by row; recommend REJECT to hold the
+          whole plan. Do not paste the table.
+        decision_options: ["Action the Plan", "REJECT"]
         produces:
           - plan_decision
         key_data:
@@ -81,8 +81,9 @@ processes:
         description: For each store, review all its recommended actions and approve to take them all, or reject to hold the store.
         instruction: >
           {{store_name}}: review all the recommended actions for this store in the table.
-          Approve to take ALL of them now, or Reject to hold this store's actions.
-        decision_options: [APPROVE, REJECT]
+          Choose "Approve Actions" to take ALL of them now, or Reject to hold this
+          store's actions.
+        decision_options: ["Approve Actions", "REJECT"]
         produces:
           - rows_actioned
           - rows_held
@@ -144,7 +145,7 @@ processes:
     related_kpis: [ForecastAccuracy, WastageRisk]
 
     metadata:
-      version: 1
+      version: 2
       effective_from: 2026-07-23
       priority: 12
       requires_human_approval: true
