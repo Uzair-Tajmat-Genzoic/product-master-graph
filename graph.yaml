@@ -1,8 +1,7 @@
 project: product-master-graph
 version: 1
 
-# Materialised graph storage (Postgres + pgvector). Separate from the upstream
-# BigQuery sources declared in integrations/. Set DATABASE_URL in .env.
+
 storage:
   backend: postgres
   connection: ${env.DATABASE_URL}
