@@ -22,6 +22,23 @@ datasets:
     columns: [REVIEW_ID, REVIEW_TEXT, STAR_RATING, REVIEW_DATE, SOURCE_SYSTEM, CUSTOMER_NAME, MASTER_STORE_ID]
 
   - entity_type: Store
+    name: Review complaint candidates
+    description: Low-rated reviews from the last 30 days, narrowed for the
+      formulation_feedback_loop agent step. One-letter columns and a 140-char text cap keep
+      the rowset inside that step's 9000-char prompt budget. S = store id, D = review date,
+      N = integer day index (the 14-day test is done on N, not on D), T = review text,
+      P = the SKU whose catalog family name appears in T, or ''. The clustering step reads
+      [S, D, N, T] and deliberately NOT P -- `columns` is chosen per read, so P costs it
+      nothing -- while the `reviewed_products` context key reads [P] alone to mint Product
+      cards. See sql/views.sql.
+    source_table: V_REVIEW_COMPLAINT_CANDIDATES
+    connection: live_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: S }
+    columns: [S, D, N, T, P]
+
+  - entity_type: Store
     name: Complaints
     description: Complaint events for this store (lazy). Base table (not the
       V_COMPLAINT_EVENTS view) — the complaint carries ORDER_ID, matched to the
@@ -62,6 +79,16 @@ datasets:
     join_keys:
       - { entity_attribute: id, table_column: STORE_ID }
     columns: [STORE_ID, SKU_ID, ITEM_SOURCE_NAME, QUANTITY, TOTAL, NET, ORDER_DATE, ORDER_STATE, ONLINE_ORDER_ID]
+
+  - entity_type: Store
+    name: Campaign history
+    description: Zomato/Swiggy ad campaign performance for this store across ALL history, rolled up to one row per (campaign, calendar month) — no CURRENT_DATE() scoping, unlike "Current campaigns" above (lazy). Read by seasonal_campaign_planning.yaml's seasonal_campaign_history context key to evaluate past comparable-window performance for an upcoming event.
+    source_table: V_STORE_CAMPAIGN_HISTORY
+    connection: live_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: MASTER_STORE_ID }
+    columns: [MASTER_STORE_ID, CAMPAIGN_ID, MONTH, RES_ID, PLATFORM, PRODUCT_TYPE, TARGETING, SEGMENTS, WINDOW_START, WINDOW_END, AD_SPEND_RS, AD_SALES_RS, AD_ORDERS, AD_IMPRESSIONS, AD_CLICKS, ROI, ADS_M2O_PCT, OVERALL_M2O_PCT, ROAS, CTR]
 
   # Same V_SEGMENT_BUDGET table as the CustomerSegment link below, joined by
   # STORE instead — lets a Store-anchored gather (e.g. campaign_planning_
@@ -245,14 +272,40 @@ datasets:
     columns: [PRODUCT_LINE_ID, PRODUCT_LINE_NAME, CATEGORY_NAME, ACTIVE_SKUS, MIN_COGS_INR, MAX_COGS_INR, AVG_SHELF_LIFE_DAYS]
 
   - entity_type: Product
+    name: Product family names
+    description: >-
+      ONE ROW whose NM is every active product family, pipe-separated -- the closed vocabulary
+      formulation_feedback_loop's clustering step must pick from when it infers a product from
+      free review text. Aggregated into a single row on purpose: a context_package fact that is
+      a list of more than 4 rows is previewed down to 4 before the step sees it, so 24 family
+      rows would arrive as 4. Not entity-scoped -- never rendered as a Product widget.
+      CG pairs the same families with their entry-pack COGS, so an approved reformulation brief
+      can carry TARGET_COGS_INR. Families with no costed active SKU are absent from CG.
+    source_table: V_PRODUCT_FAMILY_NAMES
+    connection: pim_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: ID }
+    columns: [ID, NM, CG]
+
+  - entity_type: Product
     name: Triage similarity candidates
-    description: Pipeline ideas + active competitor products unioned into one candidate set, read cross-type via dataset_search by idea_capture_triage's first step so the similarity match sees every row un-truncated. Not entity-scoped — never rendered as a Product widget.
+    description: >-
+      Pipeline ideas + live SKUs + per-category counts + competitor examples + an end-of-list
+      sentinel, unioned into one candidate set behind a numerically-prefixed SRC discriminator.
+      Read cross-type via dataset_search by idea_capture_triage's TWO matching steps, each
+      filtering SRC to its own arms so each gets its own 9000-char step-input budget. FOUR
+      PACKED COLUMNS: a column name is a JSON key on every row, and the previous ten-column
+      shape measured 16904 chars against a 9000 cap. Per-grain fields are packed positionally
+      into D — see sql/views.sql for the layout. Every column a step references, in `columns`
+      or in `filters`, must be declared below or the read 400s. Not entity-scoped — never
+      rendered as a Product widget.
     source_table: V_TRIAGE_SIMILARITY_CANDIDATES
     connection: pim_bq
     cardinality: "1:m"
     join_keys:
-      - { entity_attribute: id, table_column: CANDIDATE_ID }
-    columns: [SOURCE, CANDIDATE_ID, NAME, STAGE, HYPOTHESIS, THESIS_FIT, TARGET_COGS_INR, CITY, COMPETITOR_ID, CATEGORY]
+      - { entity_attribute: id, table_column: ID }
+    columns: [SRC, ID, NM, D]
 
   - entity_type: Product
     name: Pipeline priority candidates

@@ -73,40 +73,95 @@ JOIN `gen-lang-client-0520145261.ctx_upside_master_data.DIM_CATEGORY`       c ON
 WHERE v.IS_ACTIVE
 GROUP BY 1, 2, 3;
 
--- Triage similarity candidates: every pipeline idea plus every active competitor
--- product, unioned into ONE rowset so idea_capture_triage's first step can pull
--- them through a single step-level `fetch:` and see them UN-TRUNCATED. Reading
--- them as two separate context_package keys previews each list down to 4 rows
--- (_compact_facts), which silently hid 12 of 16 competitor products.
+-- Triage similarity candidates: five grains in one rowset behind a SRC discriminator,
+-- read by idea_capture_triage's two matching steps.
+--
+-- FOUR PACKED COLUMNS, as V_PIPELINE_PRIORITY_CANDIDATES below. STEP INPUT DATA is a silent
+-- 9000-char TAIL slice and every column name repeats as a JSON key per row; the old
+-- ten-column shape measured 16904. Fields are packed positionally into D — keep this layout
+-- in sync with each step's legend. HYPOTHESIS/THESIS_FIT dropped: free text per row, and
+-- dataset_upsert coalesces nulls, so the write-back survives without them.
+--
+-- D by SRC:
+--   1_IDEA  <stage>|<target_cogs>
+--   2_PORT  <status>|<category>|<cogs>   (ProductStatus, not IdeaStage)
+--   3_CAT   <packed k=v counts>
+--   4_COMP  <competitor_id>|<category>
+--   9_END   empty
+--
+-- SPLIT ACROSS TWO STEPS, each with its own 9000 budget: match_pipeline_ideas filters
+-- SRC IN ('1_IDEA','9_END'), match_portfolio_and_market takes the rest. Packed-but-unsplit
+-- fits today at 7790, but DIM_IDEA grows on every approve/reject.
+--
+-- SRC IS NUMERICALLY PREFIXED so alphabetical order is importance order: both steps read
+-- `order_by: SRC asc` and the cut takes the TAIL. Place new grains by importance, 9_END last.
+--
+-- MEASURED: step A 673 chars / 7 rows, step B 6441 / 57. Re-measure on any change:
+--   SELECT LENGTH(TO_JSON_STRING(ARRAY_AGG(t))) FROM V_TRIAGE_SIMILARITY_CANDIDATES t
+-- If B overflows, cut in order: COMP cap below 2, then CAT's units_90d/growth_pct, then NM
+-- length. NOT by lowering `limit` — that drops whole tail arms including the sentinel,
+-- hiding the overflow this design exists to expose.
 CREATE OR REPLACE VIEW `gen-lang-client-0520145261.ctx_upside_master_data.V_TRIAGE_SIMILARITY_CANDIDATES` AS
+-- 1_IDEA — every pipeline idea, rejected ones included: a prior rejection is the strongest
+-- REJECT signal the triage has.
 SELECT
-  'IDEA'                                AS SOURCE,
-  i.IDEA_ID                             AS CANDIDATE_ID,
-  i.NAME                                AS NAME,
-  i.STAGE                               AS STAGE,
-  i.HYPOTHESIS                          AS HYPOTHESIS,
-  i.THESIS_FIT                          AS THESIS_FIT,
-  CAST(i.TARGET_COGS_INR AS STRING)     AS TARGET_COGS_INR,
-  CAST(NULL AS STRING)                  AS CITY,
-  CAST(NULL AS STRING)                  AS COMPETITOR_ID,
-  CAST(NULL AS STRING)                  AS CATEGORY
+  '1_IDEA'                              AS SRC,
+  i.IDEA_ID                             AS ID,
+  i.NAME                                AS NM,
+  CONCAT(IFNULL(i.STAGE, ''), '|', IFNULL(CAST(i.TARGET_COGS_INR AS STRING), '')) AS D
 FROM `gen-lang-client-0520145261.ctx_upside_master_data.DIM_IDEA` i
 UNION ALL
+-- 2_PORT — every active SKU. One missing here reads as "no duplicate", and
+-- portfolio_duplicate EXACT is a TIER 1 auto-reject.
 SELECT
-  'COMPETITOR_PRODUCT'                  AS SOURCE,
-  cp.COMPETITOR_PRODUCT_ID              AS CANDIDATE_ID,
-  cp.PRODUCT_NAME                       AS NAME,
-  CAST(NULL AS STRING)                  AS STAGE,
-  CAST(NULL AS STRING)                  AS HYPOTHESIS,
-  CAST(NULL AS STRING)                  AS THESIS_FIT,
-  CAST(NULL AS STRING)                  AS TARGET_COGS_INR,
-  cp.CITY                               AS CITY,
-  cp.COMPETITOR_ID                      AS COMPETITOR_ID,
-  cm.CATEGORY                           AS CATEGORY
-FROM `gen-lang-client-0520145261.ctx_upside_master_data.DIM_COMPETITOR_PRODUCT` cp
-LEFT JOIN `gen-lang-client-0520145261.ctx_upside_master_data.DIM_COMPETITOR` cm
-  ON cm.COMPETITOR_ID = cp.COMPETITOR_ID AND cm.IS_ACTIVE
-WHERE cp.IS_ACTIVE;
+  '2_PORT'                              AS SRC,
+  v.SKU                                 AS ID,
+  v.DISPLAY_NAME                        AS NM,
+  CONCAT(IFNULL(CAST(v.STATUS AS STRING), ''), '|', IFNULL(c.CATEGORY_NAME, ''), '|',
+         IFNULL(CAST(ROUND(v.TOTAL_COGS_INR) AS STRING), '')) AS D
+FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_PRODUCT_ENRICHED` v
+JOIN `gen-lang-client-0520145261.ctx_upside_master_data.DIM_PRODUCT`  d ON d.SKU = v.SKU
+JOIN `gen-lang-client-0520145261.ctx_upside_master_data.DIM_CATEGORY` c ON c.CATEGORY_ID = d.CATEGORY_ID
+WHERE v.IS_ACTIVE
+UNION ALL
+-- 3_CAT — one row per category, so competitor counts are READ, not counted off the capped
+-- COMP rows. NULL IS NOT ZERO on the two competitor fields: DIM_COMPETITOR.CATEGORY is free
+-- text and V_CATEGORY_MARKET_SIGNAL LEFT JOINs a normalised key, so NULL means "vocabulary
+-- doesn't align", not "no competitors" — IFNULL(...,0) would erase that. ACTIVE_SKUS is
+-- different: NULL there is a measured "we don't sell here".
+SELECT
+  '3_CAT'                               AS SRC,
+  s.CATEGORY_NAME                       AS ID,
+  s.CATEGORY_NAME                       AS NM,
+  CONCAT(
+    'competitor_products=', IFNULL(CAST(s.ACTIVE_COMPETITOR_PRODUCTS AS STRING), 'not_comparable'),
+    '; competitors=',       IFNULL(CAST(s.DISTINCT_COMPETITORS       AS STRING), 'not_comparable'),
+    '; active_skus=',       IFNULL(CAST(s.ACTIVE_SKUS_IN_CATEGORY    AS STRING), '0'),
+    '; units_90d=',         IFNULL(CAST(s.UNITS_90D                  AS STRING), 'none'),
+    '; growth_pct=',        IFNULL(CAST(s.GROWTH_PCT                 AS STRING), 'no_baseline')
+  )                                     AS D
+FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_CATEGORY_MARKET_SIGNAL` s
+UNION ALL
+-- 4_COMP — active competitor products, CAPPED AT 2 PER CATEGORY. Examples only; the counts
+-- live on 3_CAT. Never count these rows.
+SELECT SRC, ID, NM, D FROM (
+  SELECT
+    '4_COMP'                            AS SRC,
+    cp.COMPETITOR_PRODUCT_ID            AS ID,
+    cp.PRODUCT_NAME                     AS NM,
+    CONCAT(IFNULL(cp.COMPETITOR_ID, ''), '|', IFNULL(cm.CATEGORY, '')) AS D,
+    ROW_NUMBER() OVER (PARTITION BY cm.CATEGORY ORDER BY cp.COMPETITOR_PRODUCT_ID) AS rn
+  FROM `gen-lang-client-0520145261.ctx_upside_master_data.DIM_COMPETITOR_PRODUCT` cp
+  LEFT JOIN `gen-lang-client-0520145261.ctx_upside_master_data.DIM_COMPETITOR` cm
+    ON cm.COMPETITOR_ID = cp.COMPETITOR_ID AND cm.IS_ACTIVE
+  WHERE cp.IS_ACTIVE
+)
+WHERE rn <= 2
+UNION ALL
+-- 9_END — ONE sentinel, the only thing making "un-truncated" checkable rather than asserted.
+-- Both steps include it and '9_' sorts after every other label, so it is the first row a
+-- tail cut destroys: absent means cut. Never renumber it below an arm.
+SELECT '9_END' AS SRC, 'END_OF_CANDIDATES' AS ID, 'END_OF_CANDIDATES' AS NM, '' AS D;
 
 -- ---------------------------------------------------------------------
 -- Innovation pipeline prioritisation (processes/innovation_pipeline_prioritisation.yaml)
@@ -396,6 +451,7 @@ brief_factor_scores AS (
       IF(b.DAYS_IN_STAGE IS NULL,     ['time_in_stage'],  [])
     ), ','), ''), 'none')                                      AS UNKNOWNS
   FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_IDEA_PRIORITY_INPUTS` b
+  WHERE b.STAGE IN ('Capture', 'Triage', 'Feasibility')
 ),
 brief_scores AS (
   SELECT
@@ -611,6 +667,56 @@ GROUP BY
   m.MASTER_STORE_ID,
   r.CAMPAIGN_ID;
 
+-- Seasonal/historical counterpart to V_STORE_CAMPAIGN_CURRENT, for
+-- seasonal_campaign_planning. Same underlying problem as above — RAW_MARKETING_DATA
+-- is daily ad data with no store id of its own (RES_ID is a platform ad/restaurant
+-- id) — resolved via the same STORE_CHANNEL_MAPPING join against ZOMATO_ID/
+-- SWIGGY_ID. The difference: this view drops V_STORE_CAMPAIGN_CURRENT's
+-- CURRENT_DATE()-scoped WHERE entirely and rolls up to one row per (store,
+-- campaign, CALENDAR MONTH) across ALL history instead of "this month, live
+-- now" — so last year's performance around any event date is queryable by MONTH.
+-- ROI/ROAS/CTR use the same SAFE_DIVIDE formulas as V_STORE_CAMPAIGN_CURRENT, for
+-- the same reason noted there: the process DSL has no arithmetic op, so these
+-- ratios must already be correct per row before an agent step ever reads them.
+CREATE OR REPLACE VIEW `gen-lang-client-0520145261.bronze.V_STORE_CAMPAIGN_HISTORY` AS
+SELECT
+  m.MASTER_STORE_ID,
+  r.CAMPAIGN_ID,
+  DATE_TRUNC(r.DATE, MONTH) AS MONTH,
+  ANY_VALUE(r.RES_ID) AS RES_ID,
+  ANY_VALUE(
+    CASE
+      WHEN r.RES_ID = CAST(m.ZOMATO_ID AS STRING) THEN 'ZOMATO'
+      WHEN r.RES_ID = CAST(m.SWIGGY_ID AS STRING) THEN 'SWIGGY'
+      ELSE 'UNKNOWN'
+    END
+  ) AS PLATFORM,
+  ANY_VALUE(r.PRODUCT_TYPE) AS PRODUCT_TYPE,
+  ANY_VALUE(r.TARGETING) AS TARGETING,
+  ANY_VALUE(r.SEGMENTS) AS SEGMENTS,
+  MIN(r.DATE) AS WINDOW_START,
+  MAX(r.DATE) AS WINDOW_END,
+  ROUND(SUM(r.AD_SPEND_RS), 0) AS AD_SPEND_RS,
+  ROUND(SUM(r.AD_SALES_RS), 0) AS AD_SALES_RS,
+  SUM(r.AD_ORDERS) AS AD_ORDERS,
+  SUM(r.AD_IMPRESSIONS) AS AD_IMPRESSIONS,
+  SUM(r.AD_CLICKS) AS AD_CLICKS,
+  SAFE_DIVIDE(SUM(r.AD_SALES_RS), SUM(r.AD_SPEND_RS)) AS ROI,
+  ANY_VALUE(CAST(r.ADS_M2O_PCT AS FLOAT64)) AS ADS_M2O_PCT,
+  ANY_VALUE(CAST(r.OVERALL_M2O_PCT AS FLOAT64)) AS OVERALL_M2O_PCT,
+  SAFE_DIVIDE(SUM(r.AD_SALES_RS) - SUM(r.AD_SPEND_RS), SUM(r.AD_SPEND_RS)) AS ROAS,
+  SAFE_DIVIDE(SUM(r.AD_CLICKS), SUM(r.AD_IMPRESSIONS)) AS CTR
+FROM `gen-lang-client-0520145261.bronze.RAW_MARKETING_DATA` r
+JOIN `gen-lang-client-0520145261.bronze.STORE_CHANNEL_MAPPING` m
+  ON r.RES_ID IN (
+      CAST(m.ZOMATO_ID AS STRING),
+      CAST(m.SWIGGY_ID AS STRING)
+  )
+GROUP BY
+  m.MASTER_STORE_ID,
+  r.CAMPAIGN_ID,
+  MONTH;
+
 -- segment_on_channel edge: MARKETING_SEGMENT_MASTER.CHANNEL ('SWIGGY'/'ZOMATO')
 -- resolves to the Channel node by name (DIM_CHANNEL.CHANNEL_NAME). Gives each
 -- CustomerSegment its Channel id (CH-012 Swiggy / CH-015 Zomato).
@@ -638,3 +744,62 @@ FROM `gen-lang-client-0520145261.bronze.MARKETING_BUDGET` b
 JOIN `gen-lang-client-0520145261.bronze.MARKETING_SEGMENT_MASTER` s
   ON b.SEGMENT_TYPE = s.SEGMENT_CODE
  AND UPPER(b.CHANNEL) = UPPER(s.CHANNEL);
+
+-- ============================================================================
+-- ============================================================================
+-- V_REVIEW_COMPLAINT_CANDIDATES -- input to formulation_feedback_loop process.
+-- ============================================================================
+-- Narrows low-rated reviews (<= 3 stars) from the last 30 days. Formats date (D),
+-- computes integer day index (N) for rolling 14-day window evaluation, truncates
+-- text (T) to 140 chars for prompt budget, and extracts matched SKU (P).
+CREATE OR REPLACE VIEW `gen-lang-client-0520145261.bronze.V_REVIEW_COMPLAINT_CANDIDATES` AS
+WITH fams AS (
+  SELECT MIN(SKU) AS SKU, FAM FROM (
+    SELECT SKU, TRIM(REGEXP_REPLACE(
+        REGEXP_REPLACE(DISPLAY_NAME, r'(?i)^(Dessert|Mithai|Snack|Savoury|Fudge)\s*-\s*', ''),
+        r'(?i)[-\s]*\d+\s*(gm|gms|g|kg|ml)\b\.?', '')) AS FAM
+    FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_PRODUCT_ENRICHED`
+    WHERE IS_ACTIVE)
+  GROUP BY FAM
+),
+base AS (
+  SELECT
+    REVIEW_ID,
+    MASTER_STORE_ID                            AS S,
+    FORMAT_DATE('%Y-%m-%d', DATE(REVIEW_DATE)) AS D,
+    DATE_DIFF(DATE(REVIEW_DATE), DATE '2026-01-01', DAY) AS N,
+    SUBSTR(REVIEW_TEXT, 0, 140)                AS T
+  FROM `gen-lang-client-0520145261.bronze.CUSTOMER_REVIEW_EVENTS`
+  WHERE REVIEW_DATE >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+    AND STAR_RATING <= 3
+)
+SELECT b.S, b.D, b.N, b.T, IFNULL(f.SKU, '') AS P
+FROM base b
+LEFT JOIN fams f ON STRPOS(UPPER(b.T), UPPER(f.FAM)) > 0
+-- Deduplicate reviews matching multiple product families (longest match wins).
+QUALIFY ROW_NUMBER() OVER (PARTITION BY b.REVIEW_ID
+                           ORDER BY LENGTH(IFNULL(f.FAM, '')) DESC) = 1;
+
+
+-- ============================================================================
+-- V_PRODUCT_FAMILY_NAMES -- closed product vocabulary for formulation_feedback_loop.
+-- ============================================================================
+-- Single-row reference view aggregating active product family names (NM) and 
+-- entry-pack COGS (CG) into a pipe-separated string to ground LLM clustering.
+CREATE OR REPLACE VIEW `gen-lang-client-0520145261.ctx_upside_master_data.V_PRODUCT_FAMILY_NAMES` AS
+SELECT
+  'FAMILIES' AS ID,                       -- constant: the link needs a join column, but this is never entity-scoped
+  STRING_AGG(fam, ' | ' ORDER BY fam) AS NM,
+  STRING_AGG(IF(cogs IS NULL, NULL, FORMAT('%s=%d', fam, cogs)), ' | ' ORDER BY fam) AS CG
+FROM (
+  SELECT
+    TRIM(
+      REGEXP_REPLACE(
+        REGEXP_REPLACE(DISPLAY_NAME, r'(?i)^(Dessert|Mithai|Snack|Savoury|Fudge)\s*-\s*', ''),
+        r'(?i)[-\s]*\d+\s*(gm|gms|g|kg|ml)\b\.?', '')
+    ) AS fam,
+    CAST(ROUND(MIN(CAST(TOTAL_COGS_INR AS FLOAT64))) AS INT64) AS cogs
+  FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_PRODUCT_ENRICHED`
+  WHERE IS_ACTIVE
+  GROUP BY fam
+);

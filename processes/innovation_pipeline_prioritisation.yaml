@@ -130,12 +130,18 @@ processes:
         # That is why the shortlist_* scalars exist and why _score / _band were added.
         # Keep every one of them SHORT. The key_data cards read facts directly and are
         # not subject to this, so the full ranking still renders for the reviewer.
+        # EVERY fact the instruction says to produce must be listed here -- the runner keeps
+        # only these keys and silently drops the rest, so an unlisted one is computed and
+        # thrown away, and the step that needs it is left with nothing to cite.
         produces:
           - ranked_pipeline
+          - advance_candidates
           - pipeline_summary
           - band_counts
           - shortlist_reason
           - unknowns_count
+          # The TWELVE FLAT SCALARS: _name/_category are templated into the research steps'
+          # skill args, _score/_band are the only way those numbers reach finalise_ranking.
           - shortlist_1_name
           - shortlist_1_category
           - shortlist_1_score
@@ -148,6 +154,14 @@ processes:
           - shortlist_3_category
           - shortlist_3_score
           - shortlist_3_band
+        # One authored card instead of one per produced fact. Display only -- cards read facts
+        # uncompacted, so the scalars above stay produced without each minting its own card.
+        key_data:
+          - title: "Ranked pipeline"
+            summary: "Every active brief scored and ranked, with its band and the reason behind the score"
+            views:
+              - { view: table, from: ranked_pipeline, columns: [rank, NAME, STAGE, inferred_category, priority_score, priority_band, reason] }
+              - { view: markdown, from: pipeline_summary }
         instruction: >
           `priority_candidates` is the COMPLETE, un-truncated input set. Five of the
           six factors are ALREADY SCORED in SQL and are correct per row: never
@@ -244,6 +258,22 @@ processes:
           ingredient_availability; 1 also cogs_vs_target" — or "None".
           finalise_ranking's `### Confidence & Gaps` card is written from THIS.
 
+          ALSO produce `advance_candidates`: one object per brief whose STAGE is Capture,
+          Triage or Feasibility — those are the ones a stage advance can move — each
+          {"IDEA_ID", "NAME", "priority_band", "priority_score": <as a string>,
+          "reason"}. EXCLUDE every brief already at Pipeline, Development, Launch or
+          Rejected: the advance writes STAGE = Pipeline, which on those would move a
+          brief BACKWARDS. Empty list if none qualify. Unlike the scalars above this is
+          read by a foreach step, which reads the fact raw and is not subject to the
+          4-row preview.
+
+          SORT `advance_candidates` BY `priority_score` DESCENDING, same order as
+          `ranked_pipeline`. The gate groups it by band and pauses per group in
+          FIRST-SEEN order, so this is the only thing that puts the HIGH band first and
+          reads each band's rows in rank order. This is a whole-pipeline list, not the
+          top three — the shortlist scalars above pick who gets external research, which
+          is a different question from who is allowed to advance a stage.
+
           ALSO produce TWELVE FLAT SCALARS for the top three: `shortlist_N_name`
           (that brief's NAME verbatim), `_category` (its `inferred_category`),
           `_score` (its `priority_score` as a string, e.g. "77.0") and `_band` (its
@@ -285,6 +315,11 @@ processes:
         # the object itself is ~500 chars and reaches that step cut to 200 (see the
         # 200-CHAR RULE on step 1). Duplication is deliberate, not an oversight.
         produces: [external_signal_1, external_1_score, external_1_reason]
+        key_data:
+          - title: "External check — rank 1"
+            summary: "What the live web research found for the top-ranked brief"
+            views:
+              - { view: table, from: external_signal_1 }
         instruction: >
           The web-research skill has already run for the rank-1 brief
           (`shortlist_1_name`); its raw payload is in `market_research_1` —
@@ -325,6 +360,11 @@ processes:
             target_category: "{{shortlist_2_category}}"
           as: market_research_2
         produces: [external_signal_2, external_2_score, external_2_reason]
+        key_data:
+          - title: "External check — rank 2"
+            summary: "What the live web research found for the second-ranked brief"
+            views:
+              - { view: table, from: external_signal_2 }
         instruction: >
           Identical to the rank-1 research step, for the rank-2 brief
           (`shortlist_2_name`), reasoning over `market_research_2` ONLY.
@@ -353,6 +393,11 @@ processes:
             target_category: "{{shortlist_3_category}}"
           as: market_research_3
         produces: [external_signal_3, external_3_score, external_3_reason]
+        key_data:
+          - title: "External check — rank 3"
+            summary: "What the live web research found for the third-ranked brief"
+            views:
+              - { view: table, from: external_signal_3 }
         instruction: >
           Identical to the rank-1 research step, for the rank-3 brief
           (`shortlist_3_name`), reasoning over `market_research_3` ONLY.
@@ -392,6 +437,11 @@ processes:
           top three and writes the reviewer-facing summary.
         after: research_shortlist_3
         produces: [final_summary, external_reason, confidence_1, confidence_2, confidence_3]
+        key_data:
+          - title: "Priority summary"
+            summary: "Recommended priorities, what the external signal said, and how far the ranking can be trusted"
+            views:
+              - { view: markdown, from: final_summary }
         instruction: >
           Work ONLY from these small facts — do NOT read `ranked_pipeline`,
           `external_signal_1/2/3`, `priority_candidates` or `pipeline_summary`. Those
@@ -479,6 +529,48 @@ processes:
         rationale_from: final_summary
         decision_options: [APPROVE, REJECT, ESCALATE]
 
+      - id: advance_to_pipeline
+        name: Advance Approved Briefs to Pipeline
+        type: foreach
+        after: pipeline_review
+        for_each: advance_candidates
+        # `group_by` is what keeps this Low HITL: one gate per BAND, and _run_item_action
+        # then fires the action once per row inside the group -- so approving HIGH advances
+        # every high-band brief in one decision instead of one gate per brief. Without it
+        # this would pause ~38 times.
+        group_by: priority_band
+        description: >
+          One approval per priority band. Approving moves that band's briefs to Pipeline in
+          DIM_IDEA, which is what makes them formulatable; rejecting leaves them where they are.
+        instruction: >
+          {{priority_band}} band. Approve to move these briefs to stage Pipeline, or reject to
+          leave them at their current stage. A brief has to reach Pipeline before a recipe can
+          be formulated against it.
+        decision_options: [APPROVE, REJECT]
+        produces: [briefs_advanced, briefs_left]
+        key_data:
+          - title: "Briefs in this band"
+            summary: "Each brief the advance would move, with the score and the reason behind it"
+            views:
+              - { view: table, from: foreach_rows, columns: [IDEA_ID, NAME, priority_band, priority_score, reason] }
+        action:
+          type: context_graph
+          name: advance_idea_to_pipeline
+          config:
+            type: dataset_upsert
+            entity_type: Product
+            source_table: DIM_IDEA
+            dataset: ctx_upside_master_data
+            key_column: IDEA_ID
+            # Two columns only. STAGE is the one column the MERGE always overwrites, and
+            # STAGE_ENTERED_AT is injected server-side when it changes; every other column is
+            # COALESCE(new, existing), so NAME, HYPOTHESIS, THESIS_FIT and TARGET_COGS_INR
+            # carry forward. No generate_key_if_blank: the brief already exists, and minting
+            # an id here would create a nameless duplicate.
+            row:
+              IDEA_ID: "{{IDEA_ID}}"
+              STAGE: Pipeline
+
     metadata:
       version: 1
       effective_from: 2026-08-05
@@ -488,11 +580,11 @@ processes:
       # BEFORE pausing, so ranked_pipeline / external_signal_* / final_summary are
       # materialised and bind to the key_data cards and the gate's rationale.
       run_steps_before_gate: true
-      # NOT set: run_actions_on_decision. This process publishes a ranking to the
-      # reviewer as key_data cards and deliberately has NO side effects — nothing is
-      # emailed and DIM_IDEA is not written. Add it (plus an `actions:` block) if a
-      # writeback or digest is ever wanted; note that a dataset_upsert action fires
-      # ONCE per decision, not once per row, so ~38 rows would need a foreach step.
+      # NOT set: run_actions_on_decision, and there is no process-level `actions:` block.
+      # The stage writeback lives on the `advance_to_pipeline` foreach step instead,
+      # because a process-level action fires ONCE per decision and would advance a single
+      # brief however many were approved. Nothing else here has side effects — no email,
+      # no digest.
 
       # Single source of truth for the scoring weights. Weights sum to 20 and each
       # factor scores 0-5, so priority_score maxes at 100.
@@ -582,6 +674,17 @@ processes:
             order_by: IDEA_ID
             order_dir: asc
             limit: 300
+          # `where` MIRRORS the BRIEF-arm filter in V_PIPELINE_PRIORITY_CANDIDATES -- without it
+          # the Raw Scoring Inputs card shows briefs the ranking never covered. Change both.
+          # `resolve` is what mints the Full Context Idea cards, one per id. It costs nothing:
+          # every row already carries NAME, and the name lookup is skipped when the column is
+          # populated, while the spec still recovers the entity. Cards are collected BEFORE the
+          # agent runs, so they cannot follow the ranking -- this scope is the only "relevant".
+          post:
+            where:
+              - { field: STAGE, op: in, value: [Capture, Triage, Feasibility] }
+            resolve:
+              - { field: IDEA_ID, type: Idea, as: NAME }
 
         # The evidence behind the market_signal factor, shown as its own card so a
         # reviewer can check a score against the category's actual sales.
