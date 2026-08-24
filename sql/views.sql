@@ -451,6 +451,7 @@ brief_factor_scores AS (
       IF(b.DAYS_IN_STAGE IS NULL,     ['time_in_stage'],  [])
     ), ','), ''), 'none')                                      AS UNKNOWNS
   FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_IDEA_PRIORITY_INPUTS` b
+  WHERE b.STAGE IN ('Capture', 'Triage', 'Feasibility')
 ),
 brief_scores AS (
   SELECT

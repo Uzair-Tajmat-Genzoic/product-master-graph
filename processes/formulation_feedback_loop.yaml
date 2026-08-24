@@ -68,7 +68,7 @@ processes:
         # `groups_considered` is emitted before the filter on purpose: making the model write
         # each group's Span down as a number is what stops it waving through a 16-day window.
         # It also shows the approver what was looked at and rejected.
-        produces: [groups_considered, formulation_clusters, signal_summary]
+        produces: [groups_considered, formulation_clusters]
         instruction: >
           Each row of `review_candidates` is one review: S = store id, D = review date
           (YYYY-MM-DD, for quoting), N = that date as an integer day number, T = review text.
