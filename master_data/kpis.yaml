@@ -21,7 +21,6 @@ kpis:
         WHERE IS_ACTIVE
       view: V_LISTING_PACKAGE
     refresh: { cache_ttl: 12h }
-    related_processes: [new_listing_creation]
 
   - id: BlockingGapsPerSku
     name: Blocking Gaps per Active SKU
@@ -41,7 +40,6 @@ kpis:
         FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_LISTING_PACKAGE`
         WHERE IS_ACTIVE
     refresh: { cache_ttl: 12h }
-    related_processes: [new_listing_creation]
 
   - id: AllergenUnderdeclarationRate
     name: Allergen Under-Declaration Rate
@@ -62,7 +60,7 @@ kpis:
       view: V_LISTING_PACKAGE
       column: ALLERGEN_UNDERDECLARED
     refresh: { cache_ttl: 12h }
-    related_processes: [new_listing_creation, label_compliance_review]
+    related_processes: [label_compliance_review]
 
   - id: ClaimSubstantiationRate
     name: Claim Substantiation Rate
@@ -81,7 +79,7 @@ kpis:
                      / NULLIF(COUNT(*), 0), 1) AS VALUE
         FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_LISTING_CLAIM_CHECK`
     refresh: { cache_ttl: 12h }
-    related_processes: [new_listing_creation, label_compliance_review]
+    related_processes: [label_compliance_review]
 
   - id: ContradictedClaimCount
     name: Unpublishable Claim Count
@@ -96,7 +94,7 @@ kpis:
         SELECT COUNTIF(VERDICT IN ('MISMATCH', 'CONTRADICTED', 'MALFORMED_CLAIM')) AS VALUE
         FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_LISTING_CLAIM_CHECK`
     refresh: { cache_ttl: 12h }
-    related_processes: [new_listing_creation, label_compliance_review]
+    related_processes: [label_compliance_review]
 
   - id: OwnRecipeShare
     name: Own-Recipe SKU Share
@@ -117,7 +115,6 @@ kpis:
       view: V_LISTING_PACKAGE
       column: INGREDIENT_SOURCE
     refresh: { cache_ttl: 24h }
-    related_processes: [new_listing_creation]
 
   - id: PanelBasisKnownShare
     name: Nutrition Basis Established Share
@@ -138,7 +135,7 @@ kpis:
       view: V_LISTING_PACKAGE
       column: NUTRIENT_BASIS
     refresh: { cache_ttl: 24h }
-    related_processes: [new_listing_creation, label_compliance_review]
+    related_processes: [label_compliance_review]
 
   - id: MandatoryNutrientCompleteness
     name: FSSAI Mandatory Nutrient Completeness
@@ -157,7 +154,7 @@ kpis:
       view: V_LISTING_PACKAGE
       column: MANDATORY_NUTRIENTS_BLANK
     refresh: { cache_ttl: 24h }
-    related_processes: [new_listing_creation, label_compliance_review]
+    related_processes: [label_compliance_review]
 
   # ---- Shelf life & availability (V_STOCKED_AT / LOW_STOCK_CONFIG) ----
   - id: WastageRisk
@@ -177,7 +174,7 @@ kpis:
       view: V_STOCKED_AT
       column: QTY_EXPIRING_WITHIN_RISK_DAYS
     refresh: { cache_ttl: 6h }
-    related_processes: [shelf_life_risk_monitoring, shelf_life_rescue_desk, demand_forecast]
+    related_processes: [shelf_life_risk_monitoring, demand_forecast]
 
   - id: ExpiryValueAtRisk
     name: Expiry Value at Risk (INR)
@@ -194,7 +191,7 @@ kpis:
         JOIN `gen-lang-client-0520145261.ctx_upside_master_data.V_PRODUCT_ENRICHED` p
           ON p.SKU = s.SKU_ID
     refresh: { cache_ttl: 6h }
-    related_processes: [shelf_life_rescue_desk, demand_forecast]
+    related_processes: [demand_forecast]
 
   - id: ExpiredStockUnits
     name: Expired Stock on the Books (units)
@@ -290,7 +287,7 @@ kpis:
         LEFT JOIN fc f ON f.store_id = i.store_id AND f.product_sku = i.product_sku
         WHERE DATE_DIFF(i.soonest, CURRENT_DATE(), DAY) BETWEEN 0 AND 3
     refresh: { cache_ttl: 6h }
-    related_processes: [shelf_life_rescue_desk, demand_forecast]
+    related_processes: [demand_forecast]
 
   # ---- Customer voice (CUSTOMER_REVIEW_EVENTS / CUSTOMER_COMPLAINT_EVENTS) ----
   - id: AvgStoreRating
@@ -305,7 +302,7 @@ kpis:
       table: CUSTOMER_REVIEW_EVENTS
       column: STAR_RATING
     refresh: { cache_ttl: 12h }
-    related_processes: [customer_review_aggregation_and_triage, dark_store_ops_escalation]
+    related_processes: [customer_review_aggregation_and_triage]
 
   - id: LowRatingShare
     name: Low-Rating Share (<= 3 stars)
@@ -345,7 +342,6 @@ kpis:
         WHERE SAFE_CAST(COMPLAINT_RECEIVED_AT AS DATE)
               >= DATE_SUB(CURRENT_DATE(), INTERVAL 60 DAY)
     refresh: { cache_ttl: 12h }
-    related_processes: [dark_store_ops_escalation]
 
   - id: StoresOverOpsComplaintBar
     name: Stores Over the Ops-Complaint Bar
@@ -368,7 +364,6 @@ kpis:
         )
         SELECT COUNTIF(ops >= 3) AS VALUE FROM per_store
     refresh: { cache_ttl: 12h }
-    related_processes: [dark_store_ops_escalation]
 
   - id: NearExpiryComplaintShare
     name: Near-Expiry Product Complaint Share

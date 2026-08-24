@@ -2,6 +2,7 @@ version: 1
 
 # Goal tree: company goal -> business areas -> the specific things teams work on.
 # Every `kpi` and `process` id here must exist, or apply fails.
+# Only processes on master are referenced — see the note at the bottom.
 
 title: Business goals
 description: >-
@@ -85,7 +86,7 @@ goals:
     kpis:
       - { kpi: WastageRisk,        aggregation: sum, cadence: Daily }
       - { kpi: ExpiryValueAtRisk,  aggregation: sum, cadence: Daily }
-    processes: [shelf_life_risk_monitoring, shelf_life_rescue_desk, demand_forecast]
+    processes: [shelf_life_risk_monitoring, demand_forecast]
 
   - id: avoid_stock_outs
     parent: reduce_stock_wastage
@@ -117,21 +118,6 @@ goals:
       - { kpi: ExpiredStockUnits, aggregation: sum, cadence: Daily }
     processes: [shelf_life_risk_monitoring, demand_forecast]
 
-  - id: stop_over_ordering
-    parent: reduce_stock_wastage
-    name: Stop over-ordering
-    kind: operational
-    description: >-
-      Order only what we can sell, so the same products do not end up at risk every
-      week.
-    horizon: FY26
-    owner: supply_chain_team
-    contributors: [demand_planning_team]
-    applies_to: [Product, Store]
-    kpis:
-      - { kpi: SellThroughGap, aggregation: avg, cadence: Weekly }
-    processes: [shelf_life_rescue_desk]
-
   # --- customer satisfaction ------------------------------------------------
   - id: dont_sell_near_expiry_stock
     parent: improve_customer_satisfaction
@@ -148,22 +134,6 @@ goals:
       - { kpi: NearExpiryComplaintShare, aggregation: avg, cadence: Weekly }
       - { kpi: AvgStoreRating,           aggregation: avg, cadence: Weekly }
     processes: [customer_review_aggregation_and_triage, shelf_life_risk_monitoring]
-
-  - id: fix_delivery_problems
-    parent: improve_customer_satisfaction
-    name: Fix delivery problems
-    kind: operational
-    description: >-
-      Track late, wrong, missing and damaged deliveries at each store, and raise them
-      with the delivery partner.
-    horizon: FY26
-    owner: cx_team
-    contributors: [demand_planning_team]
-    applies_to: [Store, Complaint]
-    kpis:
-      - { kpi: OpsComplaintShare,         aggregation: avg, cadence: Weekly }
-      - { kpi: StoresOverOpsComplaintBar, aggregation: sum, cadence: Weekly }
-    processes: [dark_store_ops_escalation]
 
   - id: reduce_low_ratings
     parent: improve_customer_satisfaction
@@ -226,21 +196,6 @@ goals:
       - { kpi: AdsConversionGapPct, aggregation: avg, cadence: Weekly }
     processes: [campaign_planning_optimisation]
 
-  - id: protect_product_margin
-    parent: plan_and_spend_on_data
-    name: Protect product margin
-    kind: operational
-    description: >-
-      Keep the gap between selling price and cost above target, so growth does not
-      come from cutting prices.
-    horizon: FY26
-    owner: portfolio_team
-    contributors: [sales_team]
-    applies_to: [Product, Channel]
-    kpis:
-      - { kpi: MarginPct, aggregation: avg, cadence: Monthly }
-    processes: [new_listing_creation]
-
   # --- new products ---------------------------------------------------------
   - id: decide_on_pending_ideas
     parent: launch_new_products_faster
@@ -270,3 +225,11 @@ goals:
     kpis:
       - { kpi: BriefScorableShare, aggregation: avg, cadence: Weekly }
     processes: [innovation_pipeline_prioritisation]
+
+# Held back until their process files land on master. Each one's only process is
+# off-master today, so the goal would have nothing delivering it:
+#   stop_over_ordering    -> shelf_life_rescue_desk      (KPI SellThroughGap)
+#   fix_delivery_problems -> dark_store_ops_escalation   (OpsComplaintShare,
+#                                                         StoresOverOpsComplaintBar)
+#   protect_product_margin -> new_listing_creation       (MarginPct)
+# The KPIs stay defined in kpis.yaml, so re-adding a goal is a paste.
