@@ -69,7 +69,19 @@ processes:
         # the gate "checked, absent" would look identical to "step failed". Write-back fields
         # stay null (unrendered -> SQL NULL -> COALESCE keeps the stored value); anything the
         # gate reads uses the literal "NONE".
-        produces: [matched_idea_id, idea_name, hypothesis, thesis_fit, target_cogs_inr, similar_ideas, prior_rejection_id, pipeline_overlap, idea_set_status]
+        # The first five are read by name in the approve/reject actions, so they can never be
+        # folded into a brief. Dropping matched_idea_id blanks the upsert key, and
+        # generate_key_if_blank then mints a duplicate instead of updating the matched idea.
+        produces: [matched_idea_id, idea_name, hypothesis, thesis_fit, target_cogs_inr,
+                   similar_ideas, prior_rejection_id, pipeline_overlap, idea_set_status]
+        # One authored card replaces the auto per-fact cards entirely, so the codes and
+        # write-back fields above stay produced without each minting its own card. Cards render
+        # facts UNCOMPACTED, unlike a step prompt -- this is display only, nothing else moves.
+        key_data:
+          - title: "Pipeline match"
+            summary: "Existing pipeline ideas this one resembles, with their stage and target COGS"
+            views:
+              - { view: table, from: similar_ideas, columns: [IDEA_ID, NAME, STAGE, TARGET_COGS_INR] }
         instruction: >
           Match this idea against `idea_candidates` (your step input) and `idea_input`, plus
           `hypothesis_input` and `target_cogs_input` if the founder supplied them. Reason only
@@ -140,7 +152,17 @@ processes:
           limit: 400
           required: true
           as: market_candidates
-        produces: [triage_brief, similar_competitor_products, competitive_reason, portfolio_duplicate, portfolio_overlap, target_category, candidate_set_status]
+        # portfolio_duplicate and candidate_set_status are read by the gate, not shown: the
+        # triage_tiers rules compare them (portfolio_duplicate_exact, and a TRUNCATED set is
+        # what stops "none found" being trusted).
+        produces: [triage_brief, similar_competitor_products, portfolio_duplicate,
+                   portfolio_overlap, target_category, candidate_set_status, competitive_reason]
+        key_data:
+          - title: "Triage brief"
+            summary: "Pipeline overlap, portfolio overlap, prior rejections and competitor signal"
+            views:
+              - { view: markdown, from: triage_brief }
+              - { view: table, from: similar_competitor_products, columns: [COMPETITOR_PRODUCT_ID, PRODUCT_NAME, COMPETITOR_ID] }
         instruction: >
           Work from `market_candidates` (your step input) plus `idea_name`, `pipeline_overlap`
           and `prior_rejection_id` from the previous step. Reason only from those.
@@ -217,7 +239,16 @@ processes:
           as: ingredient_master
         # `*_count` scalars exist alongside the lists because the gate reads scalars: a
         # list arrives previewed to 4 rows.
-        produces: [ingredient_brief, ingredient_coverage, missing_ingredients, missing_ingredient_count, out_of_scope_ingredients, out_of_scope_count, out_of_scope_is_core, ingredient_reason]
+        # The two name LISTS are not facts: they duplicated cards 2 and 3 of ingredient_brief
+        # verbatim, so nothing read them. The counts and out_of_scope_is_core stay -- the
+        # feasibility ladder and triage tiers compare them, and a rule needs the value.
+        produces: [ingredient_brief, ingredient_coverage, missing_ingredient_count,
+                   out_of_scope_count, out_of_scope_is_core, ingredient_reason]
+        key_data:
+          - title: "Ingredient availability"
+            summary: "Already sourced, needs new sourcing, and anything outside the brand line"
+            views:
+              - { view: markdown, from: ingredient_brief }
         instruction: >
           Work from `ingredient_master` (your step input) plus `idea_name` and `hypothesis`.
           Reason only from those.
@@ -232,7 +263,7 @@ processes:
           then is an unmatched ingredient UNKNOWN rather than net-new: mark those
           "(unverified — ingredient list incomplete)" and say so in `ingredient_reason`.
           Not finding an ingredient in a complete list is a finding, not a doubt — never
-          add that mark, and never carry it into `missing_ingredients`.
+          add that mark, and never carry it onto the second card.
 
           Derive the 5–12 ingredients this product would plausibly need — concrete ("whey
           protein isolate", "dates"), not categories. These are your inference from a name,
@@ -266,10 +297,9 @@ processes:
 
           `ingredient_coverage` {"derived": <int>, "matched": <int>} — `derived` is the total
           across all three cards, `matched` the first card's length.
-          `missing_ingredients` the second card's names (empty list if none), and
-          `missing_ingredient_count` its length.
-          `out_of_scope_ingredients` the third card's names, and `out_of_scope_count` its
-          length — 0, never null, when there are none.
+          `missing_ingredient_count` the second card's length, and `out_of_scope_count` the
+          third card's length — 0, never null, when there are none. The cards themselves are
+          the list; count what you wrote there rather than re-deriving it.
           `out_of_scope_is_core` whether an off-brand ingredient IS the premise rather than
           an addition. "YES" remove it and no product is left (a creatine gummy). "NO" the
           product stands without it (a date-and-almond bar that adds BCAAs is still a
@@ -298,6 +328,11 @@ processes:
           required: true
           as: production_capability
         produces: [feasibility_brief, feasibility_verdict, feasibility_reason]
+        key_data:
+          - title: "Feasibility"
+            summary: "Capability fit against the lines we make today, cost envelope and applicability risk"
+            views:
+              - { view: markdown, from: feasibility_brief }
         instruction: >
           Work from `production_capability` (your step input) plus `idea_name`,
           `hypothesis`, `thesis_fit`, `target_cogs_inr`, `ingredient_coverage`,
@@ -364,6 +399,12 @@ processes:
             target_category: "{{target_category}}"
           as: market_research_raw
         produces: [market_situation_brief, decision_summary, market_reason]
+        key_data:
+          - title: "Market situation"
+            summary: "Retail price, where it is sold and customer reach, each line citing its source domain"
+            views:
+              - { view: markdown, from: market_situation_brief }
+              - { view: markdown, from: decision_summary }
         instruction: >
           The web-research skill has already run; its raw payload is `market_research_raw`.
           Reason over that ONLY and never invent data beyond it. The four one-line `*_reason`
