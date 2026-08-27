@@ -73,6 +73,27 @@ entities:
       - { name: name,     type: string, required: true }
       - { name: category, type: string }
 
+  # Backs DIM_RECIPE. COGS is deliberately NOT a property: V_RECIPE_COGS computes it on
+  # every read from the lines times today's rates, because a stored cost would freeze at
+  # apply time and the whole point of use-case 18 is that it moves. Same argument
+  # V_IDEA_PRIORITY_INPUTS makes for DAYS_IN_STAGE. The version chain (PARENT_RECIPE_ID)
+  # is read through the DIM_RECIPE dataset link, not projected as an edge.
+  - type: Recipe
+    description: A versioned, quantified formulation. Attaches to a live SKU (a baseline or a
+      reformulation) or to a pipeline Idea (an NPD trial), never both.
+    properties:
+      - { name: name,                type: string, required: true }   # RECIPE_NAME
+      - { name: version_no,          type: number }
+      - { name: status,              type: reference, references: RecipeStatus }
+      - { name: is_current,          type: boolean }
+      - { name: batch_size_g,        type: number }
+      - { name: packaging_cost_inr,  type: number }
+      - { name: labour_overhead_inr, type: number }
+      - { name: target_cogs_inr,     type: number }
+      - { name: author,              type: string }
+      - { name: notes,               type: string }
+      - { name: created_at,          type: string }
+
   - type: Allergen
     description: A declared allergen (Nuts, Dairy, Eggs, Polyols).
     properties:

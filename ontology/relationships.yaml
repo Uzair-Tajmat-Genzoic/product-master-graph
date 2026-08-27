@@ -26,10 +26,45 @@ relationships:
     cardinality: many-to-one
 
   - type: contains_ingredient      # 4
-    description: Bill of materials — a product is built from an ingredient.
+    description: Bill of materials — a product is built from an ingredient. Extracted from
+      V_PRODUCT_INGREDIENT, which is recipe-first and falls back to the frozen legacy
+      MAP_PRODUCT_INGREDIENT only for SKUs with no current recipe.
     from: Product
     to:   Ingredient
     cardinality: many-to-many
+
+  # 31-33 back the recipe layer. recipe_for_product and recipe_for_idea both come off
+  # DIM_RECIPE: the extractor skips rows whose join column is null (extract.py:197), so an
+  # Idea recipe contributes only to the second and a SKU recipe only to the first, with no
+  # splitting views. That behaviour is load-bearing.
+  - type: recipe_for_product       # 31
+    description: A recipe version formulates a live SKU.
+    from: Recipe
+    to:   Product
+    cardinality: many-to-one
+
+  - type: recipe_for_idea          # 32
+    description: A recipe version formulates a pipeline brief, pre-SKU — the NPD half of
+      use-case 18, where each version is checked against the brief's target COGS.
+    from: Recipe
+    to:   Idea
+    cardinality: many-to-one
+
+  - type: recipe_uses_ingredient   # 33
+    description: A quantified BOM line. qty_net_g is canonical GRAMS in one finished unit;
+      cost is charged on gross = net / (1 - loss_pct/100). qty_authored/uom preserve what the
+      author typed ("200 ml") without any downstream expression branching on a unit.
+    from: Recipe
+    to:   Ingredient
+    cardinality: many-to-many
+    edge_properties:
+      - { name: qty_net_g,    type: number }
+      - { name: qty_authored, type: number }
+      - { name: uom,          type: string }
+      - { name: loss_pct,     type: number }
+      - { name: role,         type: reference, references: RecipeLineRole }
+      - { name: line_seq,     type: number }
+      - { name: is_optional,  type: boolean }
 
   - type: declares_allergen        # 5
     description: A product declares an allergen (directly or by facility trace).

@@ -77,6 +77,34 @@ entities:
     id: INGREDIENT_ID
     properties: { name: INGREDIENT_NAME, category: CATEGORY }
 
+  - type: Recipe
+    table: DIM_RECIPE
+    id: RECIPE_ID
+    properties:
+      name:                RECIPE_NAME
+      version_no:          VERSION_NO
+      status:              STATUS
+      is_current:          IS_CURRENT
+      batch_size_g:        BATCH_SIZE_G
+      packaging_cost_inr:  PACKAGING_COST_INR
+      labour_overhead_inr: LABOUR_OVERHEAD_INR
+      target_cogs_inr:     TARGET_COGS_INR
+      author:              AUTHOR
+      notes:               NOTES
+      created_at:          CREATED_AT
+
+  # Declared in entities.yaml but never projected until now — recipe_for_idea needs a real
+  # node on the other end. 12 rows.
+  - type: Idea
+    table: DIM_IDEA
+    id: IDEA_ID
+    properties:
+      name:            NAME
+      stage:           STAGE
+      hypothesis:      HYPOTHESIS
+      thesis_fit:      THESIS_FIT
+      target_cogs_inr: TARGET_COGS_INR
+
   - type: Allergen
     table: DIM_ALLERGEN
     id: ALLERGEN_ID
@@ -138,10 +166,37 @@ relationships:
     from: { entity: ProductLine, column: PRODUCT_LINE_ID }
     to:   { entity: Category,    column: CATEGORY_ID }
 
+  # REPOINTED from MAP_PRODUCT_INGREDIENT: recipe-first, with the frozen legacy table as
+  # fallback for SKUs that have no current recipe. See V_PRODUCT_INGREDIENT in sql/views.sql.
   - type: contains_ingredient
-    table: MAP_PRODUCT_INGREDIENT
+    table: V_PRODUCT_INGREDIENT
     from: { entity: Product,    column: SKU }
     to:   { entity: Ingredient, column: INGREDIENT_ID }
+
+  # Both edges come off DIM_RECIPE; the extractor drops rows whose join column is null
+  # (extract.py:197), so Idea recipes and SKU recipes separate themselves.
+  - type: recipe_for_product
+    table: DIM_RECIPE
+    from: { entity: Recipe,  column: RECIPE_ID }
+    to:   { entity: Product, column: SKU }
+
+  - type: recipe_for_idea
+    table: DIM_RECIPE
+    from: { entity: Recipe, column: RECIPE_ID }
+    to:   { entity: Idea,   column: IDEA_ID }
+
+  - type: recipe_uses_ingredient
+    table: MAP_RECIPE_INGREDIENT
+    from: { entity: Recipe,     column: RECIPE_ID }
+    to:   { entity: Ingredient, column: INGREDIENT_ID }
+    edge_properties:
+      qty_net_g:    QTY_NET_G
+      qty_authored: QTY_AUTHORED
+      uom:          UOM
+      loss_pct:     LOSS_PCT
+      role:         ROLE
+      line_seq:     LINE_SEQ
+      is_optional:  IS_OPTIONAL
 
   - type: declares_allergen
     table: MAP_PRODUCT_ALLERGEN

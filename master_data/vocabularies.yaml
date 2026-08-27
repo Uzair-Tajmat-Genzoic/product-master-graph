@@ -150,6 +150,51 @@ vocabularies:
       - { id: Weekly,    label: "Weekly",    order: 4 }
       - { id: Spot,      label: "Spot",      order: 5 }
 
+  - id: RecipeStatus
+    name: Recipe Version Status
+    owner: npd_team
+    members:
+      - { id: Baseline,   label: "Baseline (matches the live SKU)", order: 1 }
+      - { id: Draft,      label: "Draft",                           order: 2 }
+      - { id: InTrial,    label: "In trial",                         order: 3 }
+      - { id: Approved,   label: "Approved",                         order: 4 }
+      - { id: Superseded, label: "Superseded",                       order: 5 }
+      - { id: Rejected,   label: "Rejected",                         order: 6 }
+
+  # Drives the mass profile, the micro-ingredient cost caps and swap-candidate matching.
+  - id: RecipeLineRole
+    name: Recipe Line Role
+    owner: npd_team
+    members:
+      - { id: Base,       label: "Base",                   order: 1 }
+      - { id: Dairy,      label: "Dairy",                  order: 2 }
+      - { id: Inclusion,  label: "Inclusion",              order: 3 }
+      - { id: Fat,        label: "Fat",                    order: 4 }
+      - { id: Protein,    label: "Protein",                order: 5 }
+      - { id: Sweetener,  label: "Sweetener",              order: 6 }
+      - { id: Functional, label: "Functional",             order: 7 }
+      - { id: Flavour,    label: "Flavour",                order: 8 }
+      - { id: Spice,      label: "Spice / condiment",      order: 9 }
+      - { id: ProcessAid, label: "Processing aid",         order: 10 }
+
+  # kg / L only. A 'unit' uom (eggs by the dozen) would need a unit-mass column and a third
+  # branch in every cost expression; industrial baking buys eggs by weight.
+  - id: PriceUom
+    name: Ingredient Price Unit
+    owner: procurement_team
+    members:
+      - { id: kg, label: "per kilogram", order: 1 }
+      - { id: L,  label: "per litre",    order: 2 }
+
+  - id: PriceSource
+    name: Ingredient Price Provenance
+    owner: procurement_team
+    members:
+      - { id: seed_reconciled, label: "Seeded, reconciled to master COGS", order: 1 }
+      - { id: supplier_quote,  label: "Supplier quote",                    order: 2 }
+      - { id: purchase_invoice, label: "Purchase invoice",                 order: 3 }
+      - { id: contract,        label: "Contracted rate",                   order: 4 }
+      - { id: market_index,    label: "Market index",                      order: 5 }
   # ============================================================
   # DEMO FILLER — fabricated solely so every Governed-objects row
   # (Function/Role/Person) shows at least one connection in the
