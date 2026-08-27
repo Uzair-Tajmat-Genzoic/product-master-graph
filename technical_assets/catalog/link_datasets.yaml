@@ -359,7 +359,157 @@ datasets:
       - { entity_attribute: id, table_column: CATEGORY_ID }
     columns: [CATEGORY_ID, CATEGORY_NAME]
 
+  # --- attached to Recipe (use-case #18) ---------------------------------
+  - entity_type: Recipe
+    name: Recipe header
+    description: The versioned formulation record (lazy, 1:1). The two costs here are the
+      NON-ingredient components only — packaging and conversion. The ingredient component and
+      the total are computed live by V_RECIPE_COGS and deliberately not stored.
+      PARENT_RECIPE_ID is how the version chain is read; there is no supersedes edge.
+    source_table: DIM_RECIPE
+    connection: pim_bq
+    cardinality: "1:1"
+    join_keys:
+      - { entity_attribute: id, table_column: RECIPE_ID }
+    columns: [RECIPE_ID, SKU, IDEA_ID, RECIPE_NAME, VERSION_NO, PARENT_RECIPE_ID, STATUS, IS_CURRENT, BATCH_SIZE_G, PACKAGING_COST_INR, LABOUR_OVERHEAD_INR, TARGET_COGS_INR, AUTHOR, NOTES, CREATED_AT]
+
+  - entity_type: Recipe
+    name: Recipe COGS
+    description: Live rolled-up COGS for this version — ingredients + packaging + overhead,
+      each named, plus yield, mass closure, variance against the SKU's master TOTAL_COGS_INR
+      and the TARGET_FIT band. Recomputed on every read. Read IS_FULLY_COSTED alongside the
+      total, because an unpriced line makes a recipe look CHEAPER rather than dearer.
+    source_table: V_RECIPE_COGS
+    connection: pim_bq
+    cardinality: "1:1"
+    join_keys:
+      - { entity_attribute: id, table_column: RECIPE_ID }
+    columns: [RECIPE_ID, SKU, IDEA_ID, RECIPE_NAME, VERSION_NO, PARENT_RECIPE_ID, STATUS, IS_CURRENT, LINES, UNCOSTED_LINES, IS_FULLY_COSTED, BATCH_SIZE_G, NET_MASS_G, GROSS_MASS_G, YIELD_PCT, MASS_VARIANCE_G, INGREDIENT_COST_INR, PACKAGING_COST_INR, LABOUR_OVERHEAD_INR, RECIPE_COGS_INR, INGREDIENT_SHARE_PCT, OVERHEAD_SHARE_PCT, COGS_PER_100G_INR, MASTER_COGS_INR, MASTER_VARIANCE_INR, MASTER_VARIANCE_PCT, TARGET_COGS_INR, TARGET_FIT]
+
+  - entity_type: Recipe
+    name: Recipe lines
+    description: This recipe's BOM lines priced at today's rates. The read behind "which line
+      is the money" — sort by COST_SHARE_PCT desc to pick a substitution target.
+    source_table: V_RECIPE_LINE_COST
+    connection: pim_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: RECIPE_ID }
+    columns: [RECIPE_LINE_ID, RECIPE_ID, INGREDIENT_ID, INGREDIENT_NAME, LINE_SEQ, ROLE, QTY_NET_G, QTY_GROSS_G, QTY_AUTHORED, UOM, LOSS_PCT, IS_OPTIONAL, PRICE_INR_PER_KG, IS_COSTED, PRICE_SOURCE, SUPPLIER_NAME, LINE_COST_INR, COST_SHARE_PCT]
+
+  - entity_type: Recipe
+    name: Recipe workbench
+    description: >-
+      Header + the 3 dearest priced lines + the parent version's 3 dearest + evaluated
+      thesis checks + capped swap candidates + an end-of-list sentinel, unioned behind a
+      numerically-prefixed SRC discriminator. FIVE PACKED COLUMNS because step input data
+      is capped at 9000 chars -- see the view header in sql/views.sql for the per-grain D
+      layout and the re-measure query. ST carries the version's STATUS on every arm, so a
+      step reads only what is under review (ST in ('Draft','InTrial')); without it the
+      payload grows with the portfolio and silently overflows.
+    source_table: V_RECIPE_WORKBENCH
+    connection: pim_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: ID }
+    columns: [SRC, ID, NM, D, ST]
+
+  - entity_type: Recipe
+    name: Recipe formulation context
+    description: >-
+      The reformulation loop's single read: the COGS header, plus this version's whole BOM
+      (LINES), today's priced swap candidates each already judged against the brief's claim
+      and brand bans (CANDS), and the bans themselves (BANS) -- three packed columns on ONE
+      row. One row because a list-valued fact is previewed down to 4 rows before a step sees
+      it, so a 12-line BOM would arrive as 4 lines; packed, it arrives whole. END_MARK absent
+      means the row was cut and the guardrail columns cannot be trusted. See the view header
+      in sql/views.sql for the per-column layout, the caps and the re-measure query.
+    source_table: V_RECIPE_FORMULATION_CONTEXT
+    connection: pim_bq
+    cardinality: "1:1"
+    join_keys:
+      - { entity_attribute: id, table_column: RECIPE_ID }
+    columns: [RECIPE_ID, RECIPE_NAME, IDEA_ID, SKU, VERSION_NO, PARENT_RECIPE_ID, STATUS, RECIPE_COGS_INR, TARGET_COGS_INR, TARGET_FIT, IS_FULLY_COSTED, BATCH_SIZE_G, PACKAGING_COST_INR, LABOUR_OVERHEAD_INR, NET_MASS_G, AUTHOR, N_LINES, LINES, N_CAND, CANDS, N_BANS, BANS, END_MARK]
+
+  # --- attached to Idea --------------------------------------------------
+  # NEW entity_type in this catalog -- needs the Idea entity block in pim_bq.yaml, or
+  # dataset_search 404s with "No dataset linking 'V_RECIPE_COGS' to 'Idea'".
+  - entity_type: Idea
+    name: Trial recipes
+    description: Recipe versions formulating this brief, with live COGS against the brief's
+      TARGET_COGS_INR. The NPD half of use-case 18.
+    source_table: V_RECIPE_COGS
+    connection: pim_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: IDEA_ID }
+    columns: [RECIPE_ID, IDEA_ID, RECIPE_NAME, VERSION_NO, PARENT_RECIPE_ID, STATUS, IS_CURRENT, BATCH_SIZE_G, INGREDIENT_COST_INR, PACKAGING_COST_INR, LABOUR_OVERHEAD_INR, RECIPE_COGS_INR, COGS_PER_100G_INR, TARGET_COGS_INR, TARGET_FIT, IS_FULLY_COSTED]
+
+  # --- attached to Ingredient --------------------------------------------
+  - entity_type: Ingredient
+    name: Current cost
+    description: Today's rate, normalised to INR/kg (litre quotes converted once, here), with
+      supplier, provenance and age in days. IS_COSTED is false for an ingredient with no live
+      price row. Cannot be served from DIM_INGREDIENT_PRICE directly, because picking the
+      current row needs EFFECTIVE_TO IS NULL and dataset filters have no is_null operator.
+    source_table: V_INGREDIENT_CURRENT_COST
+    connection: pim_bq
+    cardinality: "1:1"
+    join_keys:
+      - { entity_attribute: id, table_column: INGREDIENT_ID }
+    columns: [INGREDIENT_ID, INGREDIENT_NAME, SUPPLIER_NAME, PRICE_INR, PRICE_UOM, PRICE_INR_PER_KG, EFFECTIVE_FROM, EFFECTIVE_TO, PRICE_SOURCE, IS_COSTED, PRICE_AGE_DAYS]
+
+  - entity_type: Ingredient
+    name: Price history
+    description: Every quoted rate over time with its effective window and provenance. The
+      evidence behind "this is up 8% since Q1".
+    source_table: DIM_INGREDIENT_PRICE
+    connection: pim_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: INGREDIENT_ID }
+    columns: [PRICE_ID, INGREDIENT_ID, SUPPLIER_NAME, PRICE_INR, PRICE_UOM, DENSITY_G_PER_ML, EFFECTIVE_FROM, EFFECTIVE_TO, PRICE_SOURCE, NOTE]
+
+  # --- attached to Product -----------------------------------------------
+  - entity_type: Product
+    name: Recipe versions
+    description: Every recipe version for this SKU with its live rolled-up COGS and variance
+      against the master TOTAL_COGS_INR in PRODUCT_PRICING. A non-zero variance means the
+      master figure has gone stale, which is a finding, not a defect.
+    source_table: V_RECIPE_COGS
+    connection: pim_bq
+    cardinality: "1:m"
+    join_keys:
+      - { entity_attribute: id, table_column: SKU }
+    columns: [RECIPE_ID, SKU, RECIPE_NAME, VERSION_NO, STATUS, IS_CURRENT, INGREDIENT_COST_INR, PACKAGING_COST_INR, LABOUR_OVERHEAD_INR, RECIPE_COGS_INR, MASTER_COGS_INR, MASTER_VARIANCE_INR, MASTER_VARIANCE_PCT, YIELD_PCT, IS_FULLY_COSTED, TARGET_FIT]
+
 widgets:
+  # --- Recipe page -------------------------------------------------------
+  - entity_type: Recipe
+    type: number
+    dataset: V_RECIPE_COGS
+    title: Live COGS (₹/pack)
+    position: 0
+    config: { aggregation: max, column: RECIPE_COGS_INR }
+
+  - entity_type: Recipe
+    type: number
+    dataset: V_RECIPE_COGS
+    title: Variance vs master COGS (₹)
+    position: 1
+    config: { aggregation: max, column: MASTER_VARIANCE_INR }
+
+  - entity_type: Recipe
+    type: table
+    dataset: V_RECIPE_LINE_COST
+    title: Cost by ingredient
+    position: 2
+    config:
+      columns: [INGREDIENT_NAME, ROLE, QTY_NET_G, PRICE_INR_PER_KG, LINE_COST_INR, COST_SHARE_PCT]
+      order_by: LINE_COST_INR
+      order_dir: desc
+      limit: 50
+
   # --- Store page --------------------------------------------------------
   - entity_type: Store
     type: number
@@ -482,6 +632,17 @@ widgets:
       SELECT SUM(TOTAL) AS VALUE
       FROM `gen-lang-client-0520145261.silver.BUSINESS_ANALYTICS`
       WHERE SKU_ID = {{entity_id}} AND ORDER_STATE <> 'Cancelled'
+
+  - entity_type: Product
+    type: table
+    dataset: V_RECIPE_COGS
+    title: Recipe versions & live COGS
+    position: 5
+    config:
+      columns: [VERSION_NO, STATUS, IS_CURRENT, INGREDIENT_COST_INR, PACKAGING_COST_INR, LABOUR_OVERHEAD_INR, RECIPE_COGS_INR, MASTER_VARIANCE_INR]
+      order_by: VERSION_NO
+      order_dir: desc
+      limit: 20
 
   # --- CustomerSegment page ---------------------------------------------
   - entity_type: CustomerSegment
