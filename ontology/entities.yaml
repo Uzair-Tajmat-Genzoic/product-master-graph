@@ -1,226 +1,84 @@
-# Business entity types for the product-master (better-for-you snacks) graph.
-# 22 node types across 5 tiers. Foreign keys are OMITTED from properties —
-# they appear as graph relationships instead (see relationships.yaml).
+# Business entity types for the product-master graph.
+# Replaced 2026-08-31 with the FMCG template's 10 entity types (see
+# .claude/plans/2026-08-31_fmcg-template-wipe.md for the full plan and the
+# 20-entity ontology this superseded). Source template:
+# context-graph/src/contextgraph/ontology/templates/fmcg.py
 #
-# Residency of the data behind each type:
-#   PIM      -> erp-setup.product_master           (extracted, integrations/pim_bq.yaml)
-#   LIVE     -> erp-setup.bronze/silver/gold       (extracted, integrations/live_bq.yaml)
-#   CURATED  -> authored in-graph, no table yet    (like Monginis' Deal)
-#   HYBRID   -> warehouse text + curated status
+# Master/reference data only — no transactional entities (orders, shipments,
+# purchase orders) are modeled here; that data is expected to be synced from
+# a semantic model instead. `Products` is the central hub most other
+# entities connect to. The distribution chain is `Plants -> Distribution
+# Centers -> Channel`, with no third-party reseller modeled.
 
 entities:
 
-  # ---- Tier 0 : Business identity (CURATED, authored in-graph) ----------
-  # Read by the competitive-pricing skill to build the business profile
-  # (brand + category + city). One Company/Brand instance is enough for the
-  # profile to resolve; `brand`, `category` and `city` are the fields it uses.
-  - type: Company
-    description: The operating company that owns the graph. Anchors the competitive-pricing business profile.
+  - type: Products
+    description: The sellable product — the central hub most other entities connect to — what's manufactured, stocked, inspected, promoted, and bought.
     properties:
-      - { name: name,     type: string, required: true }
-      - { name: brand,    type: string }
-      - { name: category, type: string }
-      - { name: city,     type: string }
-      - { name: country,  type: string }
-      - { name: pincode,  type: string }
+      - { name: product_name,   type: string, required: true }
+      - { name: launch_date,    type: string }
+      - { name: mrp,            type: number }
+      - { name: units_per_case, type: number }
+      - { name: category_id,    type: string, hierarchy: ProductCategory }
 
-  - type: Brand
-    description: A brand the company sells under. Same as Company when the company is single-brand.
+  - type: Plants
+    description: Manufacturing sites where Products are produced.
     properties:
-      - { name: name,     type: string, required: true }
-      - { name: category, type: string }
-      - { name: city,     type: string }
-      - { name: country,  type: string }
-      - { name: pincode,  type: string }
+      - { name: capacity_utilization_pct, type: number }
+      - { name: ownership_type,           type: string }
 
-  # ---- Tier 1 : Product / PIM spine -------------------------------------
-  - type: Product
-    description: A sellable SKU — the pivot of the graph. Fed by product_master, matched to live data by SKU.
+  - type: Suppliers
+    description: Vendors of raw materials/packaging feeding plants.
     properties:
-      - { name: name,                     type: string, required: true }   # DISPLAY_NAME
-      - { name: flavour,                  type: string }
-      - { name: size_gm,                  type: number }
-      - { name: size_label,               type: string }
-      - { name: version,                  type: string }
-      - { name: status,                   type: reference, references: ProductStatus }
-      - { name: veg_nonveg,               type: reference, references: VegNonVeg }
-      - { name: is_active,                type: boolean }
-      - { name: description,              type: string }
-      - { name: images_link,              type: string }
-      - { name: base_price_inr,           type: number }
-      - { name: gst_rate,                 type: number }
-      - { name: mrp_inr,                  type: number }
-      - { name: total_cogs_inr,           type: number }
-      - { name: shelf_life_days,          type: number }
-      - { name: packaging_type,           type: string }
-      - { name: gs1_barcode,              type: string }
-      - { name: org_labelling_compliance, type: string }
-      - { name: serving_size,             type: string }
+      - { name: approval_status,    type: string }
+      - { name: avg_lead_time_days, type: number }
 
-  - type: Category
-    description: Top of the product taxonomy (Desserts, Health Bars, Snacks, Mithai, Savories, Dessert bites).
+  - type: DistributionCenters
+    description: A company-owned warehouse that stores finished goods between production and the point of sale.
     properties:
-      - { name: name, type: string, required: true }
+      - { name: dc_name,          type: string }
+      - { name: capacity,         type: number }
+      - { name: safety_stock_qty, type: number }
 
-  - type: ProductLine
-    description: A product type within a category (Cheesecake, Brownie, Tiramisu, ...).
-    properties:
-      - { name: name, type: string, required: true }
-
-  - type: Ingredient
-    description: A raw or processed ingredient used in product recipes.
-    properties:
-      - { name: name,     type: string, required: true }
-      - { name: category, type: string }
-
-  - type: Allergen
-    description: A declared allergen (Nuts, Dairy, Eggs, Polyols).
-    properties:
-      - { name: name, type: string, required: true }
-
-  - type: Nutrient
-    description: A nutrition-panel line item (Calories, Protein, Sugars, Sodium, ...).
-    properties:
-      - { name: name, type: string, required: true }
-
-  # ---- Tier 2 : Commercial ---------------------------------------------
   - type: Channel
-    description: A go-to-market sales channel (Swiggy, Zomato, Blinkit, Zepto, Instamart, D2C, HoReCa, ...).
+    description: The point of sale — a specific, identifiable outlet/account (a store, a marketplace storefront, a dark store, a HoReCa account).
     properties:
-      - { name: name,         type: string, required: true }
-      - { name: channel_type, type: reference, references: ChannelType }
+      - { name: type, type: string, hierarchy: TradeChannel }
 
-  - type: Competitor
-    description: A competing brand tracked for pricing & positioning (curated).
+  - type: QualityInspections
+    description: A QA or regulatory check on a product or plant.
     properties:
-      - { name: name,      type: string, required: true }
-      - { name: website,   type: string }
-      - { name: hq_city,   type: string }
-      - { name: tier,      type: string }
-      - { name: category,  type: string }
-      - { name: is_active, type: boolean }
+      - { name: certificate_id, type: string }
+      - { name: result,         type: string }
 
-  - type: CompetitorProduct
-    description: A competitor SKU in a specific city, matched to one of our products (curated).
+  - type: Consumers
+    description: End buyers driving product demand.
     properties:
-      - { name: product_name, type: string, required: true }
-      - { name: size,         type: string }
-      - { name: city,         type: string }
-      - { name: is_active,    type: boolean }
+      - { name: household_segment, type: string }
+      - { name: penetration_pct,   type: number }
 
-  # ---- Tier 3 : Operations (live) --------------------------------------
-  - type: Store
-    description: A dark-store / fulfilment partner.
+  - type: Regions
+    description: A geographic sales/operations territory (e.g. zone, state) that Plants, Suppliers, DistributionCenters, and Channels all sit in.
     properties:
-      - { name: name,                 type: string, required: true }
-      - { name: city,                 type: string }
-      - { name: latitude,             type: number }
-      - { name: longitude,            type: number }
-      - { name: pos_software,         type: string }
-      - { name: type,                 type: string }
-      - { name: location_description, type: string }
+      - { name: region_name, type: string }
+    # NOTE: FMCG's `parent_region_id` property was dropped — this project's
+    # convention omits FKs from properties (hierarchy is modeled as a graph
+    # relationship instead). FMCG itself defines no Region -> Region
+    # relationship, so region nesting is not modeled here.
 
-  - type: InventoryBatch
-    description: One store's stock of one SKU in one batch on one day — the grain for precise expiry & liquidation.
+  - type: Campaigns
+    description: A time-bound marketing or trade campaign driving demand for products.
     properties:
-      - { name: snapshot_date,      type: string }
-      - { name: batch_row_number,   type: number }
-      - { name: available_quantity, type: number }
-      - { name: expiry_date,        type: string }
-      - { name: batch_hash,         type: string }
+      - { name: campaign_name, type: string }
+      - { name: start_date,    type: string }
+      - { name: end_date,      type: string }
+      - { name: budget,        type: number }
 
-  # ---- Tier 4 : Compliance & Innovation (curated / hybrid) -------------
-  # The Innovation half of this tier. Backs DIM_IDEA, which idea_capture_triage
-  # reads via V_TRIAGE_SIMILARITY_CANDIDATES. Declared so the ideas that process
-  # judges similar surface under their own "IDEA" heading on the Full Context tab
-  # rather than being lumped in with real SKUs under Product. Note that IDEA_ID
-  # (e.g. IDE-002) is not projected as a node id today — the triage sweep labels
-  # its cards from the row data, so no Idea node has to exist for the tab to read
-  # correctly, but an id-based graph link will not resolve until ideas are
-  # projected.
-  - type: Idea
-    description: A pipeline product idea from DIM_IDEA, pre-SKU. Advances through IdeaStage on triage.
+  - type: Materials
+    description: A raw material or packaging component used in production (e.g. 'PET resin', 'Sugar'), sourced from a Supplier.
     properties:
-      - { name: name,             type: string, required: true }   # NAME
-      - { name: stage,            type: reference, references: IdeaStage }
-      - { name: hypothesis,       type: string }
-      - { name: thesis_fit,       type: string }
-      - { name: target_cogs_inr,  type: number }
-
-  - type: Regulation
-    description: An FSSAI (or other) rule. Curated; drives the regulation-impact process.
-    properties:
-      - { name: name,           type: string, required: true }
-      - { name: authority,      type: string }
-      - { name: status,         type: reference, references: RegulationStatus }
-      - { name: effective_date, type: string }
-      - { name: summary,        type: string }
-      - { name: citation,       type: string }
-
-  - type: Certification
-    description: A supplier / product certificate (BRC, FSSAI, Organic, HACCP) with grade & expiry. Curated.
-    properties:
-      - { name: name,        type: string, required: true }
-      - { name: cert_type,   type: reference, references: CertificationType }
-      - { name: grade,       type: string }
-      - { name: issued_date, type: string }
-      - { name: expiry_date, type: string }
-      - { name: status,      type: reference, references: CertificationStatus }
-      - { name: coa_link,    type: string }
-
-  - type: Supplier
-    description: An ingredient supplier (in ERPNext today; extracted later). Curated for now.
-    properties:
-      - { name: name,            type: string, required: true }
-      - { name: tier,            type: reference, references: SupplierTier }
-      - { name: category,        type: string }
-      - { name: region,          type: string }
-      - { name: fssai_certified, type: boolean }
-      - { name: lead_time_days,  type: number }
-      - { name: is_active,       type: boolean }
-
-  - type: Claim
-    description: An on-pack / marketing claim. Text from PRODUCT_HIGHLIGHT; type & status curated (hybrid).
-    properties:
-      - { name: text,               type: string, required: true }
-      - { name: claim_type,         type: reference, references: ClaimType }
-      - { name: status,             type: reference, references: ClaimStatus }
-      - { name: substantiation_ref, type: string }
-
-  # ---- Tier 5 : Customer -----------------------------------------------
-  - type: Review
-    description: A customer review / star rating (store-level).
-    properties:
-      - { name: text,          type: string }
-      - { name: star_rating,   type: number }
-      - { name: review_date,   type: string }
-      - { name: source,        type: reference, references: ReviewSource }
-      - { name: customer_name, type: string }
-
-  - type: Complaint
-    description: A customer complaint. Carries the item name, so it's product-linkable.
-    properties:
-      - { name: issue_type,            type: reference, references: IssueType }
-      - { name: item_name,             type: string }
-      - { name: customer_comments,     type: string }
-      - { name: source,                type: string }
-      - { name: order_id,              type: string }
-      - { name: complaint_received_at, type: string }
-
-  - type: CustomerSegment
-    description: A marketing audience segment, per channel.
-    properties:
-      - { name: name,      type: string, required: true }
-      - { name: code,      type: string }
-      - { name: channel,   type: string }
-      - { name: is_active, type: boolean }
-
-  - type: Campaign
-    description: An ad / marketing campaign. Id from marketing data; attributes curated (hybrid).
-    properties:
-      - { name: name,       type: string, required: true }
-      - { name: channel,    type: string }
-      - { name: city,       type: string }
-      - { name: start_date, type: string }
-      - { name: end_date,   type: string }
-      - { name: budget_rs,  type: number }
+      - { name: material_code,   type: string, identifier: true }
+      - { name: material_name,   type: string }
+      - { name: material_type,   type: string }
+      - { name: unit_of_measure, type: string }
+      - { name: unit_cost,       type: number }

@@ -1,225 +1,104 @@
-# How the 20 entity types relate. 30 relationships. The number in each
-# comment matches the numbered ontology map in the explainer artifact.
-# integrations/*.yaml maps the extractable ones to BigQuery tables/views;
-# curated edges (no table) are declared here but not extracted (like
-# Monginis' Deal edges).
+# How the 10 FMCG entity types relate. 15 relationships.
+# Replaced 2026-08-31 alongside entities.yaml — see
+# .claude/plans/2026-08-31_fmcg-template-wipe.md for the full plan and the
+# 26-relationship ontology this superseded. Source template:
+# context-graph/src/contextgraph/ontology/templates/fmcg.py
+#
+# Relationship `type` names are hand-chosen (short, project-style) rather
+# than the source template's auto-generated `from_verb_to` slugs, since
+# these are authored directly in YAML rather than through the apply-template
+# API. Cardinality reflects real-world FMCG semantics — the source template
+# only marks cardinality explicitly on `sources_from`; the rest default to
+# an unspecified 1:m there.
 
 relationships:
 
-  # ---- Product structure & recipe --------------------------------------
-  - type: in_product_line          # 1
-    description: A product belongs to a product line.
-    from: Product
-    to:   ProductLine
+  - type: produced_at
+    description: A product is manufactured at a plant.
+    from: Products
+    to:   Plants
     cardinality: many-to-one
 
-  - type: line_in_category         # 2
-    description: A product line rolls up to a category.
-    from: ProductLine
-    to:   Category
-    cardinality: many-to-one
-
-  - type: in_category              # 3
-    description: A product belongs to a category (denormalised on DIM_PRODUCT).
-    from: Product
-    to:   Category
-    cardinality: many-to-one
-
-  - type: contains_ingredient      # 4
-    description: Bill of materials — a product is built from an ingredient.
-    from: Product
-    to:   Ingredient
-    cardinality: many-to-many
-
-  - type: declares_allergen        # 5
-    description: A product declares an allergen (directly or by facility trace).
-    from: Product
-    to:   Allergen
-    cardinality: many-to-many
-    edge_properties:
-      - { name: contains_type, type: reference, references: ContainsType }
-
-  - type: declares_nutrient        # 6
-    description: A product's nutrition-panel value for a nutrient.
-    from: Product
-    to:   Nutrient
-    cardinality: many-to-many
-    edge_properties:
-      - { name: value,  type: number }
-      - { name: unit,   type: string }
-      - { name: dv_pct, type: number }
-
-  # ---- Compliance & claims ---------------------------------------------
-  - type: claimed_by               # 7
-    description: An on-pack claim is printed on a product.
-    from: Claim
-    to:   Product
-    cardinality: many-to-one
-
-  - type: claim_depends_on_ingredient   # 8  (curated)
-    description: A claim's truth depends on an ingredient (e.g. a colouring for "Natural Colour").
-    from: Claim
-    to:   Ingredient
-    cardinality: many-to-many
-    edge_properties:
-      - { name: dependency_type, type: string }
-
-  - type: substantiated_by_nutrient     # 9  (curated)
-    description: A nutritional claim is substantiated by a nutrient value.
-    from: Claim
-    to:   Nutrient
-    cardinality: many-to-many
-    edge_properties:
-      - { name: asserted_value, type: number }
-      - { name: unit,           type: string }
-
-  - type: restricts_ingredient          # 10 (curated)
-    description: A regulation restricts or bans an ingredient.
-    from: Regulation
-    to:   Ingredient
-    cardinality: many-to-many
-    edge_properties:
-      - { name: restriction_type, type: string }
-      - { name: threshold,        type: string }
-      - { name: effective_date,   type: string }
-
-  - type: certifies_supplier            # 11 (curated)
-    description: A certificate certifies a supplier.
-    from: Certification
-    to:   Supplier
-    cardinality: many-to-one
-
-  - type: certifies_product             # 12 (curated)
-    description: A certificate certifies a product.
-    from: Certification
-    to:   Product
-    cardinality: many-to-many
-
-  - type: supplies_ingredient           # 13 (curated)
-    description: A supplier supplies an ingredient.
-    from: Supplier
-    to:   Ingredient
-    cardinality: many-to-many
-    edge_properties:
-      - { name: volume_per_month, type: number }
-      - { name: contract_type,    type: reference, references: ContractType }
-
-  # ---- Commercial & competition ----------------------------------------
-  - type: listed_on                # 17
-    description: A product is listed on a sales channel, with per-channel pricing.
-    from: Product
+  - type: stocked_at
+    description: A product is stocked at a channel (point of sale).
+    from: Products
     to:   Channel
     cardinality: many-to-many
-    edge_properties:
-      - { name: applicable,              type: string }
-      - { name: channel_base_price_inr,  type: number }
-      - { name: channel_gst_rate,        type: number }
-      - { name: channel_mrp_inr,         type: number }
-      - { name: channel_cogs_inr,        type: number }
-      - { name: channel_shelf_life_days, type: number }
-      - { name: primary_sales_owner,     type: string }
 
-  - type: maps_to_product          # 18 (curated)
-    description: A competitor SKU is curator-mapped to one of our products.
-    from: CompetitorProduct
-    to:   Product
+  - type: sources_from
+    description: A plant sources raw materials/packaging from a supplier.
+    from: Plants
+    to:   Suppliers
     cardinality: many-to-many
-    edge_properties:
-      - { name: match_confidence, type: number }
-      - { name: note,             type: string }
 
-  - type: catalogued_by            # 19 (curated)
-    description: A competitor product belongs to a competitor brand.
-    from: CompetitorProduct
-    to:   Competitor
-    cardinality: many-to-one
-
-  # ---- Operations & live movement --------------------------------------
-  - type: stocked_at               # 20
-    description: A product has live inventory at a store, with wastage & expiry flags.
-    from: Product
-    to:   Store
+  - type: purchases
+    description: A consumer purchases a product.
+    from: Consumers
+    to:   Products
     cardinality: many-to-many
-    edge_properties:
-      - { name: total_stock,                   type: number }
-      - { name: safe_stock,                    type: number }
-      - { name: expired_stock,                 type: number }
-      - { name: soonest_expiry,                type: string }
-      - { name: qty_expiring_within_risk_days, type: number }
-      - { name: wastage_flag,                  type: string }
-      - { name: low_stock_flag,                type: string }
-      - { name: shelf_life_days,               type: number }
 
-  - type: stock_config_for         # 30 (slow config, materialised like transfer_route)
-    description: Per-(SKU, store) low-stock thresholds — the config that defines the low_stock_flag / risk-days logic on stocked_at. Slow-moving reference data from bronze.LOW_STOCK_CONFIG.
-    from: Product
-    to:   Store
+  - type: certifies_plant
+    description: A quality inspection certifies a plant.
+    from: QualityInspections
+    to:   Plants
+    cardinality: many-to-one
+
+  - type: covers_product
+    description: A quality inspection covers a product.
+    from: QualityInspections
+    to:   Products
     cardinality: many-to-many
-    edge_properties:
-      - { name: min_days_shelf_life, type: number }
-      - { name: min_count,           type: number }
-      - { name: absolute_risk_count, type: number }
-      - { name: is_active,           type: boolean }
 
-  - type: forecast_for             # 21
-    description: A product has an ML sales forecast at a store (near-term).
-    from: Product
-    to:   Store
+  - type: plant_located_in
+    description: A plant sits in a geographic sales/operations region.
+    from: Plants
+    to:   Regions
+    cardinality: many-to-one
+
+  - type: supplier_located_in
+    description: A supplier sits in a geographic sales/operations region.
+    from: Suppliers
+    to:   Regions
+    cardinality: many-to-one
+
+  - type: channel_located_in
+    description: A channel sits in a geographic sales/operations region.
+    from: Channel
+    to:   Regions
+    cardinality: many-to-one
+
+  - type: promotes
+    description: A campaign promotes a product.
+    from: Campaigns
+    to:   Products
     cardinality: many-to-many
-    edge_properties:
-      - { name: forecast_date,            type: string }
-      - { name: predicted_sales_quantity, type: number }
-      - { name: lower_bound,              type: number }
-      - { name: upper_bound,              type: number }
 
-  - type: batch_of_product         # 22
-    description: An inventory batch is of a product.
-    from: InventoryBatch
-    to:   Product
-    cardinality: many-to-one
-
-  - type: batch_at_store           # 23
-    description: An inventory batch is held at a store.
-    from: InventoryBatch
-    to:   Store
-    cardinality: many-to-one
-
-  - type: transfer_route           # 24
-    description: An inter-store stock-transfer route with distance.
-    from: Store
-    to:   Store
+  - type: supplies_material
+    description: A supplier supplies a material.
+    from: Suppliers
+    to:   Materials
     cardinality: many-to-many
-    edge_properties:
-      - { name: distance_km,            type: number }
-      - { name: preferred_for_transfer, type: string }
 
-  # ---- Customer voice --------------------------------------------------
-  - type: review_about_store       # 25
-    description: A customer review is about a store.
-    from: Review
-    to:   Store
-    cardinality: many-to-one
+  - type: requires_material
+    description: A product requires a material (bill of materials).
+    from: Products
+    to:   Materials
+    cardinality: many-to-many
 
-  - type: complaint_about_store    # 26
-    description: A customer complaint is about a store.
-    from: Complaint
-    to:   Store
-    cardinality: many-to-one
+  - type: ships_to
+    description: A plant ships finished goods to a distribution center.
+    from: Plants
+    to:   DistributionCenters
+    cardinality: many-to-many
 
-  - type: complaint_about_product  # 27
-    description: A complaint is resolved to a product (via item-name match, lower confidence).
-    from: Complaint
-    to:   Product
-    cardinality: many-to-one
-
-  - type: segment_on_channel       # 28
-    description: A marketing segment applies to a channel.
-    from: CustomerSegment
+  - type: replenishes
+    description: A distribution center replenishes stock at a channel.
+    from: DistributionCenters
     to:   Channel
-    cardinality: many-to-one
+    cardinality: many-to-many
 
-  - type: targets_segment          # 29 (curated)
-    description: A campaign targets a customer segment.
-    from: Campaign
-    to:   CustomerSegment
+  - type: dc_located_in
+    description: A distribution center sits in a geographic sales/operations region.
+    from: DistributionCenters
+    to:   Regions
     cardinality: many-to-one
