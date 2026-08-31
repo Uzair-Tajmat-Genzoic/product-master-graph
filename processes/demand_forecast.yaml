@@ -145,11 +145,15 @@ processes:
     related_kpis: [ForecastAccuracy, WastageRisk]
 
     metadata:
-      version: 2
+      version: 3
       effective_from: 2026-07-23
       priority: 12
       requires_human_approval: true
       # NO steps_display_only -> process.steps populated -> stepped/foreach path.
+      # Portfolio sweep: assembles the plan across ALL stores and loops per store,
+      # so a bare manual/scheduled fire (no pivot entity) is valid — it discovers
+      # its own targets rather than pivoting on an input Store.
+      entity_optional: true
 
       tools:
         skills: []

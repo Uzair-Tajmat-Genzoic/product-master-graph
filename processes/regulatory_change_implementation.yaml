@@ -94,6 +94,8 @@ processes:
     metadata:
       version: 1
       priority: 10
+      # Demo sweep: fireable without a pivot entity (discovers its own targets).
+      entity_optional: true
       run_steps_before_gate: true
       tools:
         skills: []
