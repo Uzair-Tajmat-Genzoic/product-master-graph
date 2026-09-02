@@ -43,6 +43,32 @@ hierarchies:
       - { id: delhi,   label: "Delhi",   level: city, parent: india }
       - { id: bengaluru, label: "Bengaluru", level: city, parent: india }
 
+  - id: TradeChannel
+    name: Trade Channel Hierarchy
+    description: >-
+      Channel Group -> Channel -> Sub-Channel taxonomy, copied from the FMCG template
+      (context-graph/src/contextgraph/ontology/templates/fmcg.py). Attaches to Channel.type.
+    owner: sales_team
+    levels:
+      - { id: channel_group, label: "Channel Group", order: 1 }
+      - { id: channel,       label: Channel,         order: 2 }
+      - { id: sub_channel,   label: "Sub-Channel",   order: 3 }
+    members:
+      - { id: general_trade,        label: "General Trade",             level: channel_group }
+      - { id: grocery,               label: "Grocery",                   level: channel,     parent: general_trade }
+      - { id: kirana,                 label: "Kirana",                     level: sub_channel, parent: grocery }
+      - { id: modern_trade,          label: "Modern Trade",              level: channel_group }
+      - { id: organized_retail,      label: "Organized Retail",          level: channel,     parent: modern_trade }
+      - { id: supermarket,            label: "Supermarket",               level: sub_channel, parent: organized_retail }
+      - { id: ecommerce,             label: "E-commerce",                level: channel_group }
+      - { id: marketplace,           label: "Marketplace",               level: channel,     parent: ecommerce }
+      - { id: online_marketplace,     label: "Online Marketplace",        level: sub_channel, parent: marketplace }
+      - { id: quick_commerce,         label: "Quick Commerce",            level: sub_channel, parent: marketplace }
+      - { id: horeca_institutional,  label: "HoReCa / Institutional",    level: channel_group }
+      - { id: foodservice,           label: "Foodservice",               level: channel,     parent: horeca_institutional }
+      - { id: hotel_restaurant,       label: "Hotel / Restaurant / Café", level: sub_channel, parent: foodservice }
+      - { id: institutional_bulk,     label: "Institutional / Bulk Buyer", level: sub_channel, parent: foodservice }
+
   - id: ChannelGroup
     name: Channel Grouping
     description: Online vs Offline grouping — reconciles the PIM channel list with live channel strings.
