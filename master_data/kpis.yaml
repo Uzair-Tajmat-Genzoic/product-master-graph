@@ -9,7 +9,7 @@ kpis:
     name: Listing-Ready SKU Share
     description: Share of active SKUs a marketplace or FSSAI would accept with no blocking gap.
     owner: compliance_team
-    applies_to: Product
+    applies_to: Products
     unit: percentage
     target: { value: 90, comparison: gte }
     computed_by:
@@ -26,7 +26,7 @@ kpis:
     name: Blocking Gaps per Active SKU
     description: How far a SKU is from publishable, not just whether it is. Depth behind ListingReadyShare.
     owner: compliance_team
-    applies_to: Product
+    applies_to: Products
     unit: count
     target: { value: 1, comparison: lte }
     computed_by:
@@ -47,7 +47,7 @@ kpis:
       Share of active SKUs whose recipe implies an allergen the label declares only as
       "may contain" (or not at all). The highest-liability number in the graph.
     owner: compliance_team
-    applies_to: Product
+    applies_to: Products
     unit: percentage
     target: { value: 0, comparison: lte }
     computed_by:
@@ -68,7 +68,7 @@ kpis:
       Share of on-pack claims the lab panel supports within 5%. Claim-weighted, not
       averaged per SKU — one SKU with ten claims must not count as one vote.
     owner: compliance_team
-    applies_to: Product
+    applies_to: Products
     unit: percentage
     # Not 100: 'not_verifiable_from_pim' and 'needs_threshold_check' can never substantiate.
     target: { value: 90, comparison: gte }
@@ -81,20 +81,23 @@ kpis:
     refresh: { cache_ttl: 12h }
     related_processes: [label_compliance_review]
 
-  - id: ContradictedClaimCount
-    name: Unpublishable Claim Count
-    description: Claims the lab panel contradicts outright — over 20% off, a false zero claim, or malformed.
-    owner: compliance_team
-    applies_to: Claim
-    unit: count
-    target: { value: 0, comparison: lte }
-    computed_by:
-      source: bigquery
-      network_query: |
-        SELECT COUNTIF(VERDICT IN ('MISMATCH', 'CONTRADICTED', 'MALFORMED_CLAIM')) AS VALUE
-        FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_LISTING_CLAIM_CHECK`
-    refresh: { cache_ttl: 12h }
-    related_processes: [label_compliance_review]
+  # Commented out: `Claim` entity was dropped in the 2026-08-31 FMCG ontology wipe
+  # (see .claude/plans/2026-08-31_fmcg-template-wipe.md) and has no replacement.
+  # Re-enable once claim tracking is re-added to the ontology, or delete for good.
+  # - id: ContradictedClaimCount
+  #   name: Unpublishable Claim Count
+  #   description: Claims the lab panel contradicts outright — over 20% off, a false zero claim, or malformed.
+  #   owner: compliance_team
+  #   applies_to: Claim
+  #   unit: count
+  #   target: { value: 0, comparison: lte }
+  #   computed_by:
+  #     source: bigquery
+  #     network_query: |
+  #       SELECT COUNTIF(VERDICT IN ('MISMATCH', 'CONTRADICTED', 'MALFORMED_CLAIM')) AS VALUE
+  #       FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_LISTING_CLAIM_CHECK`
+  #   refresh: { cache_ttl: 12h }
+  #   related_processes: [label_compliance_review]
 
   - id: OwnRecipeShare
     name: Own-Recipe SKU Share
@@ -102,7 +105,7 @@ kpis:
       Share of active SKUs with an ingredient list of their own rather than one inherited
       from a sibling pack size. Inherited data is assembled, not verified.
     owner: portfolio_team
-    applies_to: Product
+    applies_to: Products
     unit: percentage
     target: { value: 80, comparison: gte }
     computed_by:
@@ -122,7 +125,7 @@ kpis:
       Share of active SKUs whose panel basis is known. Without it no figure is publishable:
       14.71 g protein per 100 g and per 70 g serving are two different listings.
     owner: compliance_team
-    applies_to: Product
+    applies_to: Products
     unit: percentage
     target: { value: 100, comparison: gte }
     computed_by:
@@ -141,7 +144,7 @@ kpis:
     name: FSSAI Mandatory Nutrient Completeness
     description: Share of active SKUs with no FSSAI-mandatory nutrient left blank on the panel.
     owner: compliance_team
-    applies_to: Product
+    applies_to: Products
     unit: percentage
     target: { value: 100, comparison: gte }
     computed_by:
@@ -163,7 +166,7 @@ kpis:
       Units expiring inside the store's configured risk window — the liquidation trigger.
       Target 0 is a true north, so this reads red until the network actually clears.
     owner: supply_chain_team
-    applies_to: Store
+    applies_to: Channel
     unit: units
     target: { value: 0, comparison: eq }
     computed_by:
@@ -180,7 +183,7 @@ kpis:
     name: Expiry Value at Risk (INR)
     description: Rupee cost of the stock about to be binned network-wide — units at risk priced at unit COGS.
     owner: supply_chain_team
-    applies_to: Product
+    applies_to: Products
     unit: inr
     target: { value: 25000, comparison: lte }
     computed_by:
@@ -199,7 +202,7 @@ kpis:
       Units already past expiry and still carried. Both shelf-life processes filter
       days_to_expiry >= 0, so nothing else watches this.
     owner: supply_chain_team
-    applies_to: Store
+    applies_to: Channel
     unit: units
     target: { value: 0, comparison: eq }
     computed_by:
@@ -218,7 +221,7 @@ kpis:
       Share of stocked (SKU, store) pairs at or under their configured min_count. The
       counterweight to cutting wastage — expiry risk removed by understocking is not a win.
     owner: supply_chain_team
-    applies_to: Store
+    applies_to: Channel
     unit: percentage
     target: { value: 5, comparison: lte }
     computed_by:
@@ -237,7 +240,7 @@ kpis:
     name: Critically-Low (SKU, store) Pairs
     description: Pairs at or under absolute_risk_count — the hard floor, not the reorder point.
     owner: supply_chain_team
-    applies_to: Store
+    applies_to: Channel
     unit: count
     target: { value: 0, comparison: eq }
     computed_by:
@@ -256,7 +259,7 @@ kpis:
       On-hand minus the 3-day forecast for stock inside the expiry window. Positive means
       we ordered more than will sell — the over-ordering the rescue desk exists to stop.
     owner: supply_chain_team
-    applies_to: Product
+    applies_to: Products
     unit: units
     target: { value: 0, comparison: lte }
     computed_by:
@@ -294,7 +297,7 @@ kpis:
     name: Average Store Rating
     description: Mean customer star rating across stores.
     owner: cx_team
-    applies_to: Store
+    applies_to: Channel
     unit: rating
     target: { value: 4.0, comparison: gte }
     computed_by:
@@ -310,7 +313,7 @@ kpis:
       Share of reviews at 3 stars or below over 90 days. The mean averages the tail away;
       this is the band the triage process actually acts on.
     owner: cx_team
-    applies_to: Store
+    applies_to: Channel
     unit: percentage
     target: { value: 15, comparison: lte }
     computed_by:
@@ -328,7 +331,7 @@ kpis:
       Share of complaints over 60 days owned by the dark-store partner rather than the
       product — late, wrong, missing or damaged.
     owner: cx_team
-    applies_to: Store
+    applies_to: Channel
     unit: percentage
     target: { value: 30, comparison: lte }
     computed_by:
@@ -347,7 +350,7 @@ kpis:
     name: Stores Over the Ops-Complaint Bar
     description: Stores with 3 or more last-mile complaints in 60 days — the escalation bar itself.
     owner: cx_team
-    applies_to: Store
+    applies_to: Channel
     unit: count
     target: { value: 0, comparison: eq }
     computed_by:
@@ -371,7 +374,7 @@ kpis:
       Share of product complaints where the batch on hand that day was already inside its
       shelf-life threshold. The only measure of a freshness failure reaching a customer.
     owner: production_team
-    applies_to: Product
+    applies_to: Products
     unit: percentage
     target: { value: 10, comparison: lte }
     computed_by:
@@ -425,7 +428,7 @@ kpis:
       100 - MAPE against realised sales per (SKU, store, day) over 30 days. Can go negative:
       a forecast worse than useless should read worse than zero.
     owner: demand_planning_team
-    applies_to: Product
+    applies_to: Products
     unit: percentage
     target: { value: 80, comparison: gte }
     computed_by:
@@ -465,7 +468,7 @@ kpis:
       How far into the future the latest forecast run reaches. Accuracy on a forecast that
       stops in the past plans nothing — this is what makes a stalled job visible.
     owner: demand_planning_team
-    applies_to: Product
+    applies_to: Products
     unit: days
     target: { value: 3, comparison: gte }
     computed_by:
@@ -483,7 +486,7 @@ kpis:
       Ad sales over ad spend across every running campaign. Spend-weighted, never an average
       of per-campaign ROI — a tiny-spend outlier must not outvote a flagship.
     owner: marketing_team
-    applies_to: Campaign
+    applies_to: Campaigns
     unit: ratio
     target: { value: 1.5, comparison: gte }
     computed_by:
@@ -498,7 +501,7 @@ kpis:
     name: Zero-Return Ad Spend (INR)
     description: Money on campaigns returning literally nothing, above the process's own 200-rupee floor.
     owner: marketing_team
-    applies_to: Campaign
+    applies_to: Campaigns
     unit: inr
     target: { value: 0, comparison: lte }
     computed_by:
@@ -516,7 +519,7 @@ kpis:
       Percentage points by which ad-driven menu-to-order conversion trails the store's
       overall rate. The process treats a 5-point gap as a campaign failing on its own terms.
     owner: marketing_team
-    applies_to: Campaign
+    applies_to: Campaigns
     unit: percentage
     target: { value: 5, comparison: lte }
     computed_by:
@@ -534,7 +537,7 @@ kpis:
       (MRP - COGS) / MRP across active SKUs, revenue-weighted. Previously averaged MRP_INR
       and labelled it a percentage, which read as permanently on target.
     owner: portfolio_team
-    applies_to: Product
+    applies_to: Products
     unit: percentage
     target: { value: 60, comparison: gte }
     computed_by:
@@ -547,54 +550,57 @@ kpis:
     refresh: { cache_ttl: 24h }
 
   # ---- Innovation pipeline (V_IDEA_PRIORITY_INPUTS, active briefs only) ----
-  - id: PipelineAgingDays
-    name: Pipeline Aging (days in stage)
-    description: Mean days an active brief has sat in its current stage.
-    owner: npd_team
-    applies_to: Idea
-    unit: days
-    target: { value: 45, comparison: lte }
-    computed_by:
-      source: bigquery
-      network_query: |
-        SELECT ROUND(AVG(DAYS_IN_STAGE), 1) AS VALUE
-        FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_IDEA_PRIORITY_INPUTS`
-      view: V_IDEA_PRIORITY_INPUTS
-      column: DAYS_IN_STAGE
-    refresh: { cache_ttl: 24h }
-    related_processes: [innovation_pipeline_prioritisation, idea_capture_triage]
+  # Commented out: `Idea` entity was dropped in the 2026-08-31 FMCG ontology wipe
+  # (see .claude/plans/2026-08-31_fmcg-template-wipe.md) and has no replacement.
+  # Re-enable once the innovation pipeline is re-added to the ontology, or delete for good.
+  # - id: PipelineAgingDays
+  #   name: Pipeline Aging (days in stage)
+  #   description: Mean days an active brief has sat in its current stage.
+  #   owner: npd_team
+  #   applies_to: Idea
+  #   unit: days
+  #   target: { value: 45, comparison: lte }
+  #   computed_by:
+  #     source: bigquery
+  #     network_query: |
+  #       SELECT ROUND(AVG(DAYS_IN_STAGE), 1) AS VALUE
+  #       FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_IDEA_PRIORITY_INPUTS`
+  #     view: V_IDEA_PRIORITY_INPUTS
+  #     column: DAYS_IN_STAGE
+  #   refresh: { cache_ttl: 24h }
+  #   related_processes: [innovation_pipeline_prioritisation, idea_capture_triage]
 
-  - id: StalledBriefCount
-    name: Stalled Brief Count
-    description: Active briefs past 90 days in stage — the top rung of the scoring ladder, i.e. undecided.
-    owner: npd_team
-    applies_to: Idea
-    unit: count
-    target: { value: 0, comparison: eq }
-    computed_by:
-      source: bigquery
-      network_query: |
-        SELECT COUNTIF(DAYS_IN_STAGE >= 90) AS VALUE
-        FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_IDEA_PRIORITY_INPUTS`
-    refresh: { cache_ttl: 24h }
-    related_processes: [innovation_pipeline_prioritisation]
+  # - id: StalledBriefCount
+  #   name: Stalled Brief Count
+  #   description: Active briefs past 90 days in stage — the top rung of the scoring ladder, i.e. undecided.
+  #   owner: npd_team
+  #   applies_to: Idea
+  #   unit: count
+  #   target: { value: 0, comparison: eq }
+  #   computed_by:
+  #     source: bigquery
+  #     network_query: |
+  #       SELECT COUNTIF(DAYS_IN_STAGE >= 90) AS VALUE
+  #       FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_IDEA_PRIORITY_INPUTS`
+  #   refresh: { cache_ttl: 24h }
+  #   related_processes: [innovation_pipeline_prioritisation]
 
-  - id: BriefScorableShare
-    name: Scorable Brief Share
-    description: >-
-      Share of active briefs with a target COGS and a stage date. Below this the ranking
-      is scored on midpoints, which is what the process escalates on.
-    owner: npd_team
-    applies_to: Idea
-    unit: percentage
-    target: { value: 90, comparison: gte }
-    computed_by:
-      source: bigquery
-      network_query: |
-        SELECT ROUND(COUNTIF(COGS_FIT <> 'UNKNOWN' AND DAYS_IN_STAGE IS NOT NULL) * 100.0
-                     / NULLIF(COUNT(*), 0), 1) AS VALUE
-        FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_IDEA_PRIORITY_INPUTS`
-      view: V_IDEA_PRIORITY_INPUTS
-      column: COGS_FIT
-    refresh: { cache_ttl: 24h }
-    related_processes: [innovation_pipeline_prioritisation]
+  # - id: BriefScorableShare
+  #   name: Scorable Brief Share
+  #   description: >-
+  #     Share of active briefs with a target COGS and a stage date. Below this the ranking
+  #     is scored on midpoints, which is what the process escalates on.
+  #   owner: npd_team
+  #   applies_to: Idea
+  #   unit: percentage
+  #   target: { value: 90, comparison: gte }
+  #   computed_by:
+  #     source: bigquery
+  #     network_query: |
+  #       SELECT ROUND(COUNTIF(COGS_FIT <> 'UNKNOWN' AND DAYS_IN_STAGE IS NOT NULL) * 100.0
+  #                    / NULLIF(COUNT(*), 0), 1) AS VALUE
+  #       FROM `gen-lang-client-0520145261.ctx_upside_master_data.V_IDEA_PRIORITY_INPUTS`
+  #     view: V_IDEA_PRIORITY_INPUTS
+  #     column: COGS_FIT
+  #   refresh: { cache_ttl: 24h }
+  #   related_processes: [innovation_pipeline_prioritisation]
