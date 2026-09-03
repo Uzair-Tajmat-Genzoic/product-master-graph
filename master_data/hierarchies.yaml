@@ -43,11 +43,12 @@ hierarchies:
       - { id: delhi,   label: "Delhi",   level: city, parent: india }
       - { id: bengaluru, label: "Bengaluru", level: city, parent: india }
 
-  - id: TradeChannel
-    name: Trade Channel Hierarchy
+  - id: TradeChannelClass
+    name: Trade Channel Classification
     description: >-
       Channel Group -> Channel -> Sub-Channel taxonomy, copied from the FMCG template
-      (context-graph/src/contextgraph/ontology/templates/fmcg.py). Attaches to Channel.type.
+      (context-graph/src/contextgraph/ontology/templates/fmcg.py). Reference taxonomy only —
+      Channel.type is validated against the TradeChannel hierarchy below, not this one.
     owner: sales_team
     levels:
       - { id: channel_group, label: "Channel Group", order: 1 }
@@ -69,8 +70,8 @@ hierarchies:
       - { id: hotel_restaurant,       label: "Hotel / Restaurant / Café", level: sub_channel, parent: foodservice }
       - { id: institutional_bulk,     label: "Institutional / Bulk Buyer", level: sub_channel, parent: foodservice }
 
-  - id: ChannelGroup
-    name: Channel Grouping
+  - id: TradeChannel
+    name: Trade Channel Hierarchy
     description: Online vs Offline grouping — reconciles the PIM channel list with live channel strings.
     owner: sales_team
     levels:
