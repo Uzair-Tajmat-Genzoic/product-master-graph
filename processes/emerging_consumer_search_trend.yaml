@@ -1,0 +1,226 @@
+version: 1
+
+processes:
+  # Emerging Consumer Search Trend (SIGNAL) — the process the ProcessOrchestrator runs
+  # when the `consumer-search-trend` signal fires. The detector skill takes THIS graph's
+  # categories as the subject of a grounded web search — "what queries are rising in
+  # desserts and health bars?" — and returns rising SEARCH KEYWORDS, each one a term a
+  # shopper actually types, with its growth and a cited source. It drops anything
+  # ungrounded, anything that is not keyword-shaped, and anything naming nothing we sell.
+  # This process organises that outcome (the trend table), maps each keyword to the
+  # portfolio gap it implies, and lets the innovation team decide whether to open an
+  # opportunity assessment. Renders on the event page.
+  #
+  # Marked for signals via metadata.kind: signal + metadata.signal_key. The signal→event
+  # bridge presets THIS process (by signal_key) and puts the detector payload on the
+  # event; the context_package pulls that payload's structured findings into facts.
+  #
+  # No `skill:` step here — the detector already did the search. This process only reasons
+  # over what it carried.
+  - id: emerging_consumer_search_trend
+    name: Emerging Consumer Search Trend
+    description: >
+      Reviews the rising consumer search trends surfaced by the consumer search trend
+      signal, maps each to the portfolio gap it implies (which SKUs cover it, which do
+      not), and lets the innovation team decide whether to open an opportunity assessment.
+    domain: Innovation
+    owner: innovation_team
+    definition_type: text
+
+    # `Category` is not an entity in the FMCG-template ontology — the category
+    # taxonomy lives as the `ProductCategory` hierarchy instead.
+    applies_to:
+      - entity: Products
+
+    triggers:
+      - { type: schedule, cron: "0 7 * * 1" }   # weekly, Monday 07:00
+      - { type: signal, signal_key: consumer-search-trend }
+      - { type: event, event_type: consumer-search-trend }
+      - { type: manual, allowed_roles: [InnovationLead, CategoryManager] }
+
+    # Optional in both senses: no input is required to start a run, and
+    # `metadata.entity_optional` lets a run proceed with no pivot entity at all —
+    # a trend fire carries no single SKU.
+    inputs:
+      - { name: product, type: reference, references: Products, required: false }
+
+    outputs:
+      - { name: trend_decision, type: enum, values: ["Open Opportunity Assessment", "No Action"] }
+
+    steps:
+      # 1. Summarise the trends the signal carried (read from the payload).
+      - id: summarise_search_trends
+        name: Summarise Search Trends
+        type: agent
+        description: Summarise the consumer search trends the signal surfaced.
+        instruction: >
+          `exposure_items` holds the rising consumer search KEYWORDS this signal surfaced —
+          each row has `customer` (the search term), `geography` (where it was observed),
+          `value` (how fast it is growing and why it matters to us) and `risk` (High =
+          directly relevant to our portfolio, Medium = adjacent). `trend_events` carries the
+          fuller records (trend_type, direction, timeframe, segment, related_categories,
+          evidence, source_url).
+
+          Every row is a search query shoppers are typing, not a market commentary — refer
+          to them as the keywords they are.
+
+          Write a short `trend_summary` — how many trends, which are attributes vs formats
+          vs needs, which of our categories they cluster around, and the strongest one —
+          and set `opportunity_level` (high | medium | low): high when any trend is High
+          risk. Do not restate every row; the table is shown alongside.
+
+          IMPORTANT on numbers: a trend has a real percentage ONLY where one is present in
+          the row. Where the row gives a worded growth claim instead, repeat it as a claim
+          and name its source. Never convert a worded claim into a number — these are
+          cited claims from published reporting, not measured search volume.
+        produces:
+          - trend_summary
+          - opportunity_level
+        key_data:
+          - title: Emerging Search Trends
+            summary: The rising consumer search trends surfaced this scan, and why each matters.
+            views:
+              - view: table
+                from: exposure_items
+                columns: [customer, geography, value, risk]
+
+      # 2. Map each trend to the portfolio gap it implies — the concrete NPD opportunity.
+      #    The catalogue arrives on the EVENT as `portfolio` (see context_package): the
+      #    detector's skill already read it straight from the context graph, so this step
+      #    needs no warehouse. It previously ran a `fetch` against V_PRODUCT_ENRICHED,
+      #    which this graph no longer links — and there is no substitute, since
+      #    `source: graph` and `source: related` both resolve against a pivot entity and
+      #    this signal is entity_optional.
+      - id: assess_portfolio_gap
+        name: Assess Portfolio Gap
+        type: agent
+        after: summarise_search_trends
+        description: Identify which trends our current range already covers and which are gaps.
+        instruction: >
+          `portfolio` is what we actually sell, read from the graph: `products` (product
+          names, which encode type and flavour, e.g. "Dessert-Chocolate Cheesecake-500 gm"),
+          `categories`, `product_lines` and `flavours`.
+
+          IF `portfolio` IS EMPTY or has no `products`, there is no catalogue on file to
+          compare against. Do not invent one and do not guess at coverage: emit one row per
+          trend with covered_by "none", gap "no catalogue on file — coverage unknown", and
+          `opportunity` taken from the trend's own risk (High risk -> high). Say plainly in
+          `gap_summary` that no catalogue was available, so every trend is listed as
+          uncovered pending one. Then stop — the rest of this instruction does not apply.
+
+          For each trend in `exposure_items` / `trend_events`, decide whether our current
+          range already answers it, and output `gap_items`: one row per trend with
+          {trend: the trend label, covered_by: the closest existing product's name, or
+          "none" when nothing in the range answers it, gap: one line on what is missing
+          (or "covered" when it is not a gap), opportunity: high | medium | low}.
+
+          Judge coverage from the product's name / flavour / product type — e.g. a
+          high-protein attribute trend is NOT covered by a standard dessert SKU just
+          because the category matches; a single-serve format trend is covered only by a
+          SKU whose size actually is single-serve. Rate `opportunity` high where a
+          High-risk trend meets a "none" coverage, low where the range already covers it.
+
+          One row per trend and no more — do not invent trends beyond those two facts, and
+          do not list SKUs that answer nothing. Return an empty list only if
+          `exposure_items` is empty. Also give a one-line `gap_summary` — how many trends
+          are uncovered and the biggest opportunity.
+        produces:
+          - gap_items
+          - gap_summary
+        key_data:
+          - title: Portfolio Gaps
+            summary: What our current range covers, and where the trend points at a gap.
+            views:
+              - view: table
+                from: gap_items
+                columns: [trend, covered_by, gap, opportunity]
+
+      # 3. GATE — innovation team decides whether to open an opportunity assessment.
+      - id: review_search_trends
+        name: Review Search Trends
+        type: decision
+        after: assess_portfolio_gap
+        description: Innovation team reviews the trends and gaps and decides whether to open an opportunity assessment.
+        instruction: >
+          Review the trends and the portfolio gaps they imply. Choose "Open Opportunity
+          Assessment" when one or more trends are both material and uncovered by the
+          current range; choose "No Action" when the trends are adjacent noise or the range
+          already answers them. Recommend "Open Opportunity Assessment" whenever a
+          High-risk trend has no covering SKU.
+        decision_options: ["Open Opportunity Assessment", "No Action"]
+        recommends: opportunity_level
+        rationale_from: gap_summary
+        produces:
+          - trend_decision
+        key_data:
+          - title: Emerging Search Trends
+            summary: The trends this signal surfaced, each with its cited source.
+            views:
+              - view: wordcloud
+                from: trend_events
+                columns: [head_term, relevance, trend_name]
+              - view: table
+                from: exposure_items
+                columns: [customer, geography, value, risk]
+          - title: Portfolio Gaps
+            summary: The gaps these trends imply — what to act on.
+            views:
+              - view: table
+                from: gap_items
+                columns: [trend, covered_by, gap, opportunity]
+
+      # 4. Record the opportunity assessment (simulated) — only when opened.
+      - id: record_opportunity_assessment
+        name: Record Opportunity Assessment
+        type: notify
+        after: review_search_trends
+        condition: '{{trend_decision}} == "Open Opportunity Assessment"'
+        description: Record that an opportunity assessment was opened and route to the innovation owner.
+        produces:
+          - opportunity_assessment_recorded
+        action:
+          type: simulated
+          name: record_opportunity_assessment
+          config:
+            summary: 'Consumer search trend signal — opportunity assessment opened for the uncovered trends.'
+            findings: '{{gap_items}}'
+
+    metadata:
+      version: 1
+      priority: 10
+      # This process handles a detected SIGNAL (renders on the event page like an event).
+      kind: signal
+      signal_key: consumer-search-trend
+      # A signal fire carries no guaranteed pivot entity, so a bare run is valid.
+      entity_optional: true
+      run_steps_before_gate: true
+
+      # Pull the detector payload's structured findings off the event into facts, so
+      # the steps can reason over them and the gate cards can show them. `source: event`
+      # reads the event's attributes (where the signal bridge put the payload).
+      # `portfolio` is the catalogue the detector's skill read from the graph — it rides
+      # on the event too, so this process needs no warehouse link of its own.
+      context_package:
+        - { key: exposure_items, source: event }
+        - { key: trend_events, source: event }
+        - { key: portfolio, source: event }
+
+      # Process-level "Data used" card (inherited by any gate without its own).
+      key_data:
+        - title: Portfolio Gaps
+          summary: The gaps these consumer search trends imply.
+          views:
+            - view: table
+              from: gap_items
+              columns: [trend, covered_by, gap, opportunity]
+        - title: Emerging Search Trends
+          summary: The rising consumer search trends this signal surfaced.
+          views:
+            - view: table
+              from: exposure_items
+              columns: [customer, value, risk]
+
+      tools:
+        skills: []
+        connectors: []
+        allow_unlisted_skills: false
